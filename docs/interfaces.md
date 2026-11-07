@@ -181,7 +181,7 @@ Distinct markers were planted in the scratch repo's `CLAUDE.md`, the repo `AGENT
 | repo `CLAUDE.md` | not loaded | **not loaded** (repo has `AGENTS.md` too; it takes precedence per directory) | not loaded |
 | repo `AGENTS.md` | not loaded | loaded | not loaded |
 | Pi agent-dir `AGENTS.md` | n/a | loaded | not loaded |
-| `~/.claude/CLAUDE.md` (global) | **not tested.** Planting a canary there was blocked by the permission guard. It's currently empty (0 bytes), so nothing leaks today. Expected not loaded because `user` is excluded from setting sources. | n/a (Pi doesn't read it) | n/a |
+| `~/.claude/CLAUDE.md` (global) | **not loaded** (verified with your approval: with default setting sources the same call *did* load it; file restored to 0 bytes, hash matched) | n/a (Pi doesn't read it) | n/a |
 
 Note: Pi refused to repeat markers labelled "canary token" ("leak-detection markers"), so the markers were phrased as project codenames instead.
 
@@ -207,7 +207,7 @@ Note: Pi refused to repeat markers labelled "canary token" ("leak-detection mark
 3. **Destructive git safety.** `reset --hard` / `clean -fdx` / `worktree remove` go through one guarded function. It resolves the target with `fs.realpath` and asserts it's strictly inside `<dataDir>/worktrees/`, case-insensitively on Windows and macOS. It also asserts the target isn't the main repo or one of its ancestors. A unit test asserts it throws for the main repo path, its parent, a sibling outside the data dir, and `..`-traversal and symlink/junction escapes.
 4. **Read-only gate = snapshot equality.** It does *not* require `--porcelain` to be empty, because the target repo may already be dirty. Before/after `--porcelain --ignored` snapshots must be identical, and mtime-only changes are ignored. On mismatch the step fails and the worktree is restored to its pre-step checkpoint (§8.8) via the guarded reset.
 5. **Pi structured output.** The prompt designates `steps/<id>/out/result.json`, which is outside the worktree. Pi gets `write` for that step (verified: Pi can write there). The gate checks that the worktree snapshot is unchanged and that the file exists. The file is zod-validated. On failure there's **one** repair attempt: resume the same Pi session with the zod error text and the bad file's path. A second failure fails the step. Claude keeps `--json-schema` (`result.structured_output`), validated by the same zod schema with the same single repair attempt.
-6. **Context parity.** Per §6: both disabled, and the orchestrator injects identical text. *Outstanding:* the global `~/.claude/CLAUDE.md` canary needs your approval (or a manual run) to confirm `--setting-sources ""` excludes it.
+6. **Context parity.** Per §6: both disabled, and the orchestrator injects identical text. Verified for all sources, including global `~/.claude/CLAUDE.md`.
 7. **Edit-mode parity: no shell for either worker.** Edit steps use the toolsets in §7. After implementation the orchestrator runs the configured checks. On failure it resumes the same worker session with the failure output (written to an input file, §4), up to `maxFixIterations` (config, default 2). Every fix iteration is a checkpointed edit step (§8.8).
 8. **Edit-step checkpoints.** At the start of every edit step (implement, fix_i, apply), the orchestrator commits the worktree state on the worker branch (`git add -A && git commit --allow-empty -m "fractory: checkpoint <stepId>"`, author `fractory`) and records the sha in a `checkpoint_created` event. Retrying the step = guarded `reset --hard <sha>` + `clean -fdx`, then rerun. After the step, the orchestrator commits the result (`fractory: <stepId> result`).
 9. **Model and reasoning logging.** Per §5. Config has explicit `claude.effort` (default `high`) and `pi.thinking` (default `high`; config validation allows only `off|high` for the DeepSeek Flash default and warns otherwise). Both are logged requested-vs-effective per step.
@@ -216,6 +216,5 @@ Note: Pi refused to repeat markers labelled "canary token" ("leak-detection mark
 
 ## 9. Open caveats
 - Claude quota-rejected payload not observed live (§1).
-- Global `~/.claude/CLAUDE.md` canary not run (§6).
 - Claude edit-mode writes outside cwd: not spiked (to save quota). Expected denied like reads. Snapshots cover it regardless.
 - Line endings: `core.autocrlf=true` on this machine (git warned `LF will be replaced by CRLF`). Diffs use `-c core.autocrlf=false` plus `--ignore-cr-at-eol`, verified in M2 tests.
