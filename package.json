@@ -1,0 +1,21 @@
+{
+  "name": "fractory-monorepo",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.19"
+  },
+  "scripts": {
+    "typecheck": "tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.test.json",
+    "build": "tsc -p packages/core/tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
