@@ -15,7 +15,10 @@ Local multi-model orchestrator: Opus (Claude Code, Pro subscription) and DeepSee
 - Kill whole process trees (`tree-kill`) on cancel/timeout.
 - Claude child env: delete `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`. Never use `claude --bare` (it breaks the subscription login). Assert `apiKeySource === "none"`.
 - Never log secrets. All events pass through the redactor. `.dev.vars` is gitignored and must never be committed or printed.
-- Worktrees live outside target repos (`<data-dir>/worktrees/<run>/<worker>`). Never merge or push.
+- Worktrees live outside target repos (`<data-dir>/worktrees/<run>/<label>`; branches `fractory/<run>/<label>`). Labels are random per run, and label→worker lives only in run state. Never merge or push.
+- Orchestrator commits: `-c core.hooksPath=<dataDir>/empty-hooks -c commit.gpgsign=false -c user.name=fractory -c user.email=fractory@localhost commit --no-verify`.
+- After every check run: guarded reset + clean back to the post-step commit. Check outputs become step artifacts only.
+- Step `inputs/` are hashed before/after each step. Any change = hard failure.
 - Daemon binds 127.0.0.1 only, uses a per-launch token, validates Host/Origin, no permissive CORS.
 - **Conserve Pro quota:** automated tests use `FakeWorker` only. Real-model calls only in the opt-in smoke script.
 - **No shell for workers.** Neither Claude nor Pi ever gets Bash/PowerShell. The orchestrator runs checks and feeds failures back (`maxFixIterations`).
@@ -29,7 +32,7 @@ Local multi-model orchestrator: Opus (Claude Code, Pro subscription) and DeepSee
 - **Pi always runs with the fractory path-guard extension** (`--no-extensions -e <asset>`, fail-closed allowlist: own worktree, own step inputs, own out file). Workers must never be able to read each other's worktree.
 - Snapshot handling: main-repo changes → `needs_attention` (the user may be editing concurrently). Worktree changes → hard failure.
 - Per-repo `setup` runs after worktree creation and every guarded clean. Setup failures are environment errors, never fed to workers.
-- Judge sees only squashed `base..HEAD` diffs with model/harness self-references stripped (leak-checked).
+- Judge sees only squashed `base..HEAD` diffs and repo-relative paths. Self-references are scrubbed from **prose only** (never code in diffs) and leak-checked.
 - **Real-model spikes use `claude --model haiku`** unless Opus behavior specifically is under test.
 - Details and verified flags: `docs/interfaces.md` §8.
 
