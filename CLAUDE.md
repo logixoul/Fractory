@@ -18,6 +18,15 @@ Local multi-model orchestrator: Opus (Claude Code, Pro subscription) and DeepSee
 - Worktrees live outside target repos (`<data-dir>/worktrees/<run>/<worker>`). Never merge or push.
 - Daemon binds 127.0.0.1 only, uses a per-launch token, validates Host/Origin, no permissive CORS.
 - **Conserve Pro quota:** automated tests use `FakeWorker` only. Real-model calls only in the opt-in smoke script.
+- **No shell for workers.** Neither Claude nor Pi ever gets Bash/PowerShell. The orchestrator runs checks and feeds failures back (`maxFixIterations`).
+- **Guarded destructive git.** `reset --hard` / `clean -fdx` / `worktree remove` only via the guard that asserts realpath ⊂ `<dataDir>/worktrees/`.
+- **Snapshot gates.** Before/after `git status --porcelain --ignored` snapshots of the main repo and all run worktrees on every step. Read-only = snapshots equal (not "empty").
+- **Edit steps are checkpointed** (commit at step start). Retry = guarded reset to the checkpoint.
+- **Cost is computed by the orchestrator** from tokens × the configured price table. Vendor cost fields are informational only.
+- **Transport:** prompts over stdin (never argv, never Pi `@file`). Large inputs go in step input files the agent reads.
+- **Context parity:** both harnesses have project-context loading disabled. The orchestrator injects identical project context text.
+- Log requested and resolved model ids and reasoning levels on every step.
+- Details and verified flags: `docs/interfaces.md` §8.
 
 ## Workflow
 - Milestones M0–M7 (see `spec.md`). Commit after each with `npm run typecheck && npm test` green, then stop for review.
