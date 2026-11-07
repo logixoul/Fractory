@@ -76,7 +76,9 @@ claude -p --output-format stream-json --verbose
 `--json-schema` makes Claude call a synthetic `StructuredOutput` tool. The parsed object is in `result.structured_output`, and `result.result` holds the same JSON as a string. We still validate it with zod.
 
 ### Filesystem scope (verified)
-Under `dontAsk`, `Read` of a file **outside the cwd** is denied (`permission_denials[0].tool_name === "Read"`). With `--add-dir <dir>` it succeeds. So Claude's file tools are confined to cwd + `--add-dir`s. The orchestrator snapshots (§8.2) are still the backstop.
+- Read-only (`dontAsk`): `Read` of a file **outside the cwd** is denied (`permission_denials[0].tool_name === "Read"`). With `--add-dir <dir>` it succeeds.
+- Edit (`acceptEdits`, verified with `--model haiku`): `Write` outside the cwd is **denied**. The tool_result is an error ("Claude requested permissions to write to …"), it shows up in `permission_denials`, and no file is created. A `Write` inside the cwd succeeds.
+- So Claude's file tools are confined to cwd + `--add-dir`s. **Don't `--add-dir` a parent of the run's worktrees.** Give only the step's own `inputs/` dir. Snapshots (§8.2, §8.13) remain the backstop.
 
 ### Gotchas
 - Claude cites **absolute paths** (`C:\…\testrepo\math.js`) as well as relative ones. The `path:line` validator normalizes absolute → repo-relative and accepts `\` and `/`.
@@ -141,7 +143,34 @@ Bad API key → **exit code 0** and:
 So the adapter treats `stopReason ∈ {error, aborted, length}` on the last assistant message as failure. The exit code alone isn't enough. A 429 / `rate limit` in `errorMessage` → `rate_limit` WorkerEvent. *Doc-only:* `auto_retry_start/end` events. Retries are disabled in our agent dir.
 
 ### Filesystem scope (verified, important)
-Pi's tools are **not confined to the cwd**. `read` and `write` on absolute paths outside the worktree both succeeded. Restricting the tool set is the only real control. The orchestrator snapshots (§8.2) detect writes into the main repo or worktree. A write elsewhere on disk can't be detected, which is one more reason Pi never gets `bash`/`powershell` and gets `write` only in steps that need it.
+Pi's built-in tools are **not confined to the cwd**. Without a guard, `read` and `write` on absolute paths outside the worktree both succeeded. Confinement comes from the **fractory path-guard extension** (§8.12, verified below). Pi never gets `bash`/`powershell`, and gets `write` only in steps that need it.
+
+### Path-guard extension (verified)
+Spike source: [`spikes/pi-path-guard.ts`](../spikes/pi-path-guard.ts). It ships in M2 as a core asset.
+- **Loading:** `--no-extensions -e <abs path to .ts>` loads exactly that one extension. Discovery stays off; TypeScript is loaded directly with no build step.
+- **Hook:** `pi.on("tool_call", …)` runs before execution and returns `{block:true, reason}`. `event.input` is mutable. The guard canonicalizes the path, checks it, then **rewrites `input.path` to the validated absolute path**, so Pi opens exactly what was checked.
+- **Canonicalization** mirrors Pi's `resolveToCwd`: strip a leading `@`, expand `~`, normalize unicode spaces, `path.resolve(cwd, p)`, then `realpath` of the longest existing prefix (defeats symlinks and junctions). Comparison is case-insensitive on win32/darwin.
+- **Covers** `read`, `write`, `edit`, `grep`, `find`, `ls`, with a missing `path` treated as `.`. It also rejects grep `glob` / find `pattern` that are absolute, drive-qualified, `~`-prefixed, or contain a `..` segment. Any other tool name is blocked.
+- **Config:** env `FRACTORY_PI_GUARD = {"read":[…], "write":[…]}`, which holds paths only and no secrets. Missing or invalid config → **every call blocked** (fail closed, verified).
+- **Visible in the stream:** a block produces `tool_execution_end{isError:true, result.content[0].text:"fractory path guard: read outside allowlist: <path>"}`. There's no `tool_result` (per docs). The adapter maps these to a `tool_blocked` WorkerEvent and counts them per step.
+
+Verified matrix (Pi in `worktrees/run1/deepseek`, allow read = own worktree + own `inputs/`, write = own `out/result.json`):
+
+| Attempt | Result |
+|---|---|
+| `read` own worktree `math.js` | ok |
+| `read` own step `inputs/brief.md` | ok |
+| `read` sibling `…/run1/opus/plan.md` (absolute) | **blocked** |
+| `read ../opus/plan.md` (relative) | **blocked** |
+| `ls ..` | **blocked** |
+| `grep SECRET` with `path` = `worktrees/run1` | **blocked** |
+| `write` own `out/result.json` | ok (file content `{"ok":true}`) |
+| `write hacked.txt` (in worktree, read-only step) | **blocked** |
+| `read link/plan.md` where `link` is a junction in the own worktree → sibling | **blocked** (realpath) |
+| `ls link` (same junction) | **blocked** |
+| any call with `FRACTORY_PI_GUARD` unset | **blocked** (fail closed) |
+
+Residual: recursive `grep`/`find` on an allowed dir may traverse a symlink inside it. Mitigation: the snapshot step (§8.13) lists symlinks/junctions in worktrees, and the run refuses to start a step if any of them points outside the worktree.
 
 ### Gotchas
 - JSONL framing: split on `\n` only (strip a trailing `\r`), **not** Node `readline`, which also splits on U+2028/U+2029 inside JSON strings.
@@ -194,7 +223,7 @@ Note: Pi refused to repeat markers labelled "canary token" ("leak-detection mark
 | Tool set, read-only | `--tools Read,Grep,Glob` | `--tools read,grep,find,ls` (+`write` only for the structured-output file) |
 | Tool set, edit | `--tools Read,Edit,Write,Glob,Grep` | `--tools read,edit,write,grep,find,ls` |
 | Permission | `--permission-mode dontAsk` / `acceptEdits` | n/a (no approval UI in json mode) |
-| FS confinement | cwd + `--add-dir` (verified) | **none** (verified) |
+| FS confinement | cwd + `--add-dir` (verified, read and write) | path-guard extension allowlist (verified). None without it. |
 | Config isolation | `--setting-sources "" --strict-mcp-config` | `PI_CODING_AGENT_DIR=<own>`, `--no-extensions --no-skills --no-prompt-templates --no-mcp --no-context-files` |
 | Orchestrator gates | before/after `--porcelain --ignored` snapshots of worktree **and** main repo (§8.2, §8.4) | same |
 
@@ -202,10 +231,10 @@ Note: Pi refused to repeat markers labelled "canary token" ("leak-detection mark
 
 ## 8. Requirements from the M0 review (binding for M1/M2)
 
-1. **Cost.** The orchestrator computes cost from token counts × a configured price table per `provider/model` (`input`, `output`, `cacheRead`, `cacheWrite` USD per 1M). The default entry for `together/deepseek-ai/DeepSeek-V4.1-Flash-1017` is $0.30 in / $1.20 out. A missing cacheRead/cacheWrite price defaults to the input price, and that's flagged in the event. Vendor fields (`usage.cost`, `total_cost_usd`) are stored as `vendorReportedCostUsd`, informational only. Claude on Pro: tokens recorded, cost shown as API-equivalent and labelled as such. An unknown model → cost `null` + warning (never a guess).
-2. **Out-of-worktree writes.** Before and after **every** step, snapshot `git status --porcelain=v1 -z --ignored --untracked-files=all` for the **main repo** and **every sibling worktree of the run**. Any difference outside what the step is allowed to touch fails the **run**. Allowed means only the worker's own worktree, and only in edit steps.
+1. **Cost.** The orchestrator computes cost from token counts × a configured price table per `provider/model` (`input`, `output`, `cacheRead`, `cacheWrite` USD per 1M). Default entries for `together/deepseek-ai/DeepSeek-V4.1-Flash-1017` **and** `together/deepseek-ai/DeepSeek-V4.1-Flash`: **input $0.30, output $1.20, cacheRead $0.006** per 1M. Source: together.ai/pricing "Serverless Inference" table and together.ai/models/deepseek-v4-1-flash, checked 2026-11-07. Together lists no cache-write price, and Pi reported `cacheWrite: 0` in all spikes. Entries carry a `source`/`checkedAt` field. A missing price component makes the cost `null` with a warning (no guessing). Vendor fields (`usage.cost`, `total_cost_usd`) are stored as `vendorReportedCostUsd`, informational only. Claude on Pro: tokens recorded, cost shown as API-equivalent and labelled as such. An unknown model → cost `null` + warning (never a guess).
+2. **Out-of-worktree writes.** Before and after **every** step, snapshot `git status --porcelain=v1 -z --ignored --untracked-files=all` for the **main repo** and **every sibling worktree of the run**. Allowed changes: only the worker's own worktree, only in edit steps. Snapshot entries include content hashes (§8.13). How a difference is handled depends on where it is (§8.14): main repo → `needs_attention`; any worktree → hard failure.
 3. **Destructive git safety.** `reset --hard` / `clean -fdx` / `worktree remove` go through one guarded function. It resolves the target with `fs.realpath` and asserts it's strictly inside `<dataDir>/worktrees/`, case-insensitively on Windows and macOS. It also asserts the target isn't the main repo or one of its ancestors. A unit test asserts it throws for the main repo path, its parent, a sibling outside the data dir, and `..`-traversal and symlink/junction escapes.
-4. **Read-only gate = snapshot equality.** It does *not* require `--porcelain` to be empty, because the target repo may already be dirty. Before/after `--porcelain --ignored` snapshots must be identical, and mtime-only changes are ignored. On mismatch the step fails and the worktree is restored to its pre-step checkpoint (§8.8) via the guarded reset.
+4. **Read-only gate = snapshot equality.** It does *not* require `--porcelain` to be empty, because the target repo may already be dirty. Before/after snapshots (porcelain line + content hash, §8.13) of the step's worktree must be identical. Content-identical rewrites compare equal. On mismatch the step fails and the worktree is restored to its pre-step checkpoint (§8.8) via the guarded reset.
 5. **Pi structured output.** The prompt designates `steps/<id>/out/result.json`, which is outside the worktree. Pi gets `write` for that step (verified: Pi can write there). The gate checks that the worktree snapshot is unchanged and that the file exists. The file is zod-validated. On failure there's **one** repair attempt: resume the same Pi session with the zod error text and the bad file's path. A second failure fails the step. Claude keeps `--json-schema` (`result.structured_output`), validated by the same zod schema with the same single repair attempt.
 6. **Context parity.** Per §6: both disabled, and the orchestrator injects identical text. Verified for all sources, including global `~/.claude/CLAUDE.md`.
 7. **Edit-mode parity: no shell for either worker.** Edit steps use the toolsets in §7. After implementation the orchestrator runs the configured checks. On failure it resumes the same worker session with the failure output (written to an input file, §4), up to `maxFixIterations` (config, default 2). Every fix iteration is a checkpointed edit step (§8.8).
@@ -214,7 +243,30 @@ Note: Pi refused to repeat markers labelled "canary token" ("leak-detection mark
 10. **Transport.** Per §4: prompts via stdin. Large inputs go to `steps/<id>/inputs/` files the agent reads (Claude via `--add-dir`).
 11. **Pre-flight quota check.** The most recent `rate_limit_info` is persisted to `<dataDir>/quota.json`. At run start, if the last known 5-hour or 7-day utilization ≥ `quota.warnUtilization` (default 0.8) and its `resetsAt` hasn't passed, emit `quota_warning` and print it (CLI) / show it (GUI). On the **first** live `rate_limit_event` of a run the threshold is re-checked. If the config has `quota.abortUtilization` (optional), the run pauses as `paused_quota` instead of continuing.
 
+12. **Pi path guard.** Every Pi invocation loads the fractory path-guard extension (`--no-extensions -e <asset>`; §2 "Path-guard extension"), with an allowlist built per step:
+    - read: own worktree + own `steps/<id>/inputs/`
+    - write: own worktree (edit steps only) and/or the step's designated `out/result.json`
+    - never the sibling worktree, the main repo, or other steps' dirs.
+
+    This makes duel/consensus **independence** enforceable as well as safe: a worker cannot read the other's proposal or code before the critique step hands it over as an input file. The adapter asserts the extension is loaded on every run. It counts `tool_blocked` events, logs them, and surfaces the count to the GUI. Blocks are not failures by themselves; the gates decide. Unit tests (no model) exercise the guard's `canonical`/`inside` logic directly: traversal, junction/symlink, case, `@`/`~` prefixes, glob escapes, fail-closed.
+13. **Content-aware snapshots.** A snapshot is a map `path → {porcelainXY, hash}` from `git status --porcelain=v1 -z --ignored --untracked-files=all`.
+    - Hashes: `git hash-object` for modified/untracked files, batched via `--stdin-paths`. Ignored files are hashed only up to `snapshot.maxIgnoredFileBytes` (default 1 MiB). Larger files are recorded as `{size, mtimeMs}` instead.
+    - `snapshot.excludeDirs` (default `node_modules`, `.venv`, `dist`, `build`, `target`, `.next`, `.turbo`) skips ignored dirs wholesale. An excluded dir is recorded as present/absent only.
+    - **Documented blind spot:** changes inside excluded dirs, and same-size same-mtime changes to oversized ignored files, are not detected.
+    - The snapshot also records symlinks/junctions in worktrees and their targets (see §2 residual).
+    - Snapshot equality = same key set and same `{XY, hash}` per key.
+14. **Snapshot failure policy.**
+    - **Main repo changed during a step** (you edit it concurrently): the step's own result stands, and the run moves to `needs_attention` with the changed-file list (path, before/after XY and hash). `fractory resume <id>` continues and `fractory cancel <id>` aborts (GUI: Continue/Abort buttons). The main-repo baseline is re-taken on continue.
+    - **Unexpected change in any worktree** fails the step hard: a change in a read-only step, any change to the *other* worker's worktree, or a change outside the allowed set. The offending worktree is restored via the guarded reset to its checkpoint (§8.8, §8.15).
+15. **Per-repo setup.** Config `setup: {argv: string[], timeoutMs, env?}[]` (e.g. `["npm","ci"]`). It runs in each worktree after creation and after **every** guarded clean. `preserveOnClean: string[]` patterns are passed as `git clean -fdx -e <pattern>…` (e.g. keep `node_modules/` and skip setup time). Setup output is stored in the step dir. A non-zero exit is an **environment error**: the run fails as `env_error` with the log tail. It is never fed to a worker as a check failure, and it never counts toward `maxFixIterations`.
+
+### Minor requirements
+- **Judge/report diffs are always squashed** `git diff <base>..HEAD` of the worker branch (with `-c core.autocrlf=false --ignore-cr-at-eol`, binary marked as such). Per-checkpoint commits never reach the judge.
+- **Anonymize judge inputs.** Before writing judge input files, strip model/harness self-references from proposals, critiques, diffs, and check logs. The patterns are configurable, with defaults covering `Claude`, `Claude Code`, `Anthropic`, `Opus`, `Sonnet`, `Haiku`, `DeepSeek`, `Pi` (word-boundary, case-insensitive), `Together`, model ids from config, `Co-Authored-By:` trailers, and worker branch names (`fractory/<run>/<worker>`). Each is replaced by a neutral token (`[agent]`). After the rewrite, a leak check fails the judge step if any worker-identity token remains. Rewrites are logged with counts but no content.
+- **Spikes use `--model haiku`** for Claude from now on (recorded in CLAUDE.md). The opt-in smoke script defaults to haiku as well, with `--model opus` behind a flag.
+
 ## 9. Open caveats
 - Claude quota-rejected payload not observed live (§1).
-- Claude edit-mode writes outside cwd: not spiked (to save quota). Expected denied like reads. Snapshots cover it regardless.
+- Path-guard residual: recursive tools may follow links inside an allowed dir (§2). Mitigated by the snapshot symlink check (§8.13).
+- Snapshot blind spots for excluded dirs and oversized ignored files (§8.13).
 - Line endings: `core.autocrlf=true` on this machine (git warned `LF will be replaced by CRLF`). Diffs use `-c core.autocrlf=false` plus `--ignore-cr-at-eol`, verified in M2 tests.

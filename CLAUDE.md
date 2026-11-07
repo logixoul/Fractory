@@ -26,6 +26,11 @@ Local multi-model orchestrator: Opus (Claude Code, Pro subscription) and DeepSee
 - **Transport:** prompts over stdin (never argv, never Pi `@file`). Large inputs go in step input files the agent reads.
 - **Context parity:** both harnesses have project-context loading disabled. The orchestrator injects identical project context text.
 - Log requested and resolved model ids and reasoning levels on every step.
+- **Pi always runs with the fractory path-guard extension** (`--no-extensions -e <asset>`, fail-closed allowlist: own worktree, own step inputs, own out file). Workers must never be able to read each other's worktree.
+- Snapshot handling: main-repo changes → `needs_attention` (the user may be editing concurrently). Worktree changes → hard failure.
+- Per-repo `setup` runs after worktree creation and every guarded clean. Setup failures are environment errors, never fed to workers.
+- Judge sees only squashed `base..HEAD` diffs with model/harness self-references stripped (leak-checked).
+- **Real-model spikes use `claude --model haiku`** unless Opus behavior specifically is under test.
 - Details and verified flags: `docs/interfaces.md` §8.
 
 ## Workflow
