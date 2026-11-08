@@ -146,12 +146,13 @@ So the adapter treats `stopReason ∈ {error, aborted, length}` on the last assi
 Pi's built-in tools are **not confined to the cwd**. Without a guard, `read` and `write` on absolute paths outside the worktree both succeeded. Confinement comes from the **fractory path-guard extension** (§8.12, verified below). Pi never gets `bash`/`powershell`, and gets `write` only in steps that need it.
 
 ### Path-guard extension (verified)
-Spike source: [`spikes/pi-path-guard.ts`](../spikes/pi-path-guard.ts). It ships in M2 as a core asset.
+Spike source: [`spikes/pi-path-guard.ts`](../spikes/pi-path-guard.ts). Shipped (M2) as [`packages/core/assets/pi-path-guard.ts`](../packages/core/assets/pi-path-guard.ts), with the decision logic exported for unit tests.
 - **Loading:** `--no-extensions -e <abs path to .ts>` loads exactly that one extension. Discovery stays off; TypeScript is loaded directly with no build step.
 - **Hook:** `pi.on("tool_call", …)` runs before execution and returns `{block:true, reason}`. `event.input` is mutable. The guard canonicalizes the path, checks it, then **rewrites `input.path` to the validated absolute path**, so Pi opens exactly what was checked.
 - **Canonicalization** mirrors Pi's `resolveToCwd`: strip a leading `@`, expand `~`, normalize unicode spaces, `path.resolve(cwd, p)`, then `realpath` of the longest existing prefix (defeats symlinks and junctions). Comparison is case-insensitive on win32/darwin.
 - **Covers** `read`, `write`, `edit`, `grep`, `find`, `ls`, with a missing `path` treated as `.`. It also rejects grep `glob` / find `pattern` that are absolute, drive-qualified, `~`-prefixed, or contain a `..` segment. Any other tool name is blocked.
-- **Config:** env `FRACTORY_PI_GUARD = {"read":[…], "write":[…]}`, which holds paths only and no secrets. Missing or invalid config → **every call blocked** (fail closed, verified).
+- **Config:** env `FRACTORY_PI_GUARD = {"read":[…], "write":[…], "ack", "nonce"}`, which holds paths only and no secrets.
+- **Load assertion (M2):** on load the guard writes the per-invocation `nonce` to the `ack` file (in the step dir). The adapter refuses a `done` unless the ack matches, so a Pi run without the guard can never succeed. Missing or invalid config → **every call blocked** (fail closed, verified).
 - **Visible in the stream:** a block produces `tool_execution_end{isError:true, result.content[0].text:"fractory path guard: read outside allowlist: <path>"}`. There's no `tool_result` (per docs). The adapter maps these to a `tool_blocked` WorkerEvent and counts them per step.
 
 Verified matrix (Pi in `worktrees/run1/deepseek`, allow read = own worktree + own `inputs/`, write = own `out/result.json`):

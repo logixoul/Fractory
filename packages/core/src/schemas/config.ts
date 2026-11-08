@@ -40,7 +40,8 @@ export const Price = z.object({
 });
 export type Price = z.infer<typeof Price>;
 
-const Argv = z.array(z.string().min(1)).min(1);
+/** argv[0] is the executable; later elements may be empty strings (e.g. `--flag ""`). */
+const Argv = z.tuple([z.string().min(1)], z.string());
 const Env = z.record(z.string(), z.string());
 
 export const SetupCommand = z.object({

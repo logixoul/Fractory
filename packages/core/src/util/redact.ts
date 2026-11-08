@@ -1,7 +1,7 @@
 export const REDACTED = "[REDACTED]";
 
 /** Env var names whose values are treated as secrets. */
-const SECRET_ENV_NAME = /(API_?KEY|_KEY$|^KEY$|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)/i;
+export const SECRET_ENV_NAME_RE = /(API_?KEY|_KEY$|^KEY$|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)/i;
 const MIN_SECRET_LENGTH = 8;
 
 /** Well-known credential shapes, redacted even when not registered as a secret. */
@@ -31,7 +31,7 @@ export class Redactor {
   static fromEnv(env: NodeJS.ProcessEnv = process.env, extra: Iterable<string> = []): Redactor {
     const r = new Redactor(extra);
     for (const [name, value] of Object.entries(env)) {
-      if (value && SECRET_ENV_NAME.test(name)) r.addSecret(value);
+      if (value && SECRET_ENV_NAME_RE.test(name)) r.addSecret(value);
     }
     return r;
   }

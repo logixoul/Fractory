@@ -11,7 +11,8 @@
   "scripts": {
     "typecheck": "tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.test.json",
     "build": "tsc -p packages/core/tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "smoke": "npm run build && node scripts/smoke-real.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",
