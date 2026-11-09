@@ -183,23 +183,36 @@ Review changes (M0–M5), implementation choices:
 - [x] **Login codes live in daemon memory**; Enter in the `serve` terminal mints a new one.
 - [x] **The dirty-repo check** runs at run creation only (tracked changes and untracked files).
 
-M6 review changes, implementation choices (open):
-- [ ] **Which commit a document's refs point to:**
-  - Consensus proposals, critiques and revisions, and `decision.md`: the **base commit**. Consensus worktrees never move off it.
-  - Duel judge items: **the better side's head at judging**. This is recorded as `heads` in the judge result, because the branch may move on later (apply, fixes).
-  - Duel `report.md`: the base commit, since its refs mix both sides.
-- [ ] **Which worktree "Open in VS Code" uses:**
-  - the author's worktree for proposals and critiques;
-  - the better side's worktree for duel items;
-  - the judge's worktree for `decision.md` and `report.md`.
+M6 review changes, implementation choices (reviewed):
+- [x] **Which commit a document's refs point to** *(changed in review, for duels)*:
+  - Consensus documents and `decision.md`: the base commit.
+  - **Duel judge evidence: every ref is resolved individually.** While validating the judge's evidence, the orchestrator checks each ref against side A's head, side B's head and the base. It records `{path, line/range, side, label, sha, ambiguous, chosenBy, resolvedIn}` in the item's `evidenceRefs`.
+  - When a ref resolves in more than one place it is marked `ambiguous`, and the side is picked in this order:
+    1. the side the evidence text names (e.g. `B: math.js:3`);
+    2. the side the item text names;
+    3. the item's better side;
+    4. base.
+  - In-app links, the file view and "Open in VS Code" use **each ref's own side and commit**, not the item's better side.
+  - **`report.md` uses the same per-ref data:** each evidence ref is a link to its side and commit, e.g. `[math.js:3](#ref/<label>/<sha>/3-3/math.js) (B, deepseek @ 1a2b3c4, ambiguous)`. Evidence that resolved nowhere is marked "(unresolved)".
+  - Refs in an item's prose (recommendation) use that item's resolved evidence for the same file. Otherwise they open at the better side's head.
+- [x] **Which worktree "Open in VS Code" uses:** the worktree of the ref's own side (the judge worktree for base), with the "moved on" and "removed" notes.
+- [x] **The blob endpoint serves only commits recorded in the run.**
+- [x] **Refs outside the repository are shown greyed.**
+- [x] **What's in `packages/shared`** (now also the evidence-resolution types, the in-app link format, and the evidence renderer used by both core's `report.md` and the GUI).
+- [x] **Playwright uses the installed Chrome**; `npm audit --audit-level=moderate` in CI.
+- [x] **Ref linking runs after `tick()`.**
+- [x] **The extractor regex was rewritten** (both separators covered by tests).
 
-  It's marked "may differ" when that worktree has newer commits than the one shown. After `fractory clean`, the main repository is used, with a note.
-- [ ] **The blob endpoint serves only commits recorded in the run:** `rev=base`, a contestant label (its branch), or a 40-hex sha that appears in the run state (checkpoints, step heads, judge heads). Arbitrary refs such as `HEAD~1` and unknown shas are refused. It now works for consensus runs too.
-- [ ] **Refs that point outside the repository** (an absolute path under no known root) are shown greyed and aren't clickable.
-- [ ] **What's in `packages/shared`:**
-  - It holds the zod event schemas, the state types plus `TERMINAL_STATUSES`, and the refs extractor.
-  - The GUI imports the `@fractory/shared/refs` subpath at runtime and the types type-only, so zod isn't bundled into the GUI.
-  - `npm run typecheck` and `npm run build` build shared first; tests and the GUI compile it from source.
-- [ ] **Playwright uses the locally installed Chrome** (`channel: "chrome"`, overridable with `FRACTORY_E2E_CHANNEL`), so there's no browser download; GitHub-hosted runners have Chrome. It runs against the built `dist/`, so `npm run e2e` builds first. In CI, `npm audit` should use `--audit-level=moderate`, given the two low build-time findings.
-- [ ] **Fixed an M6 bug found by the smoke test:** `path:line` refs in rendered markdown were never actually turned into links, because the linking ran before `{@html}` had written the markup. It now runs after `tick()`, and the smoke test checks it.
-- [ ] **Fixed a regression found while moving the extractor:** an editing step had collapsed `[\\/]` to `[\/]` in the regex, so Windows absolute paths in refs no longer matched. The source was rewritten, and the unit tests cover both separators.
+Per-ref resolution, implementation choices (open):
+- [ ] **How a text "names" a side** (`sideMentioned`). It recognises:
+  - `B:` / `B -` at the start of an evidence string;
+  - "side B", "implementation B", "version B" or "branch B";
+  - "B's";
+  - "(B)" or "[B]";
+  - "in B", "from B" or "of B".
+
+  Only capital A/B count, so the article "A …" isn't a side. A text that names both sides names neither.
+  - *Alternative:* ask the judge for `side` per evidence entry in the schema. More reliable, but it changes the judge's output format.
+- [ ] **"Resolves" means the same rule as everywhere else:** the file exists at that commit and the line or range is within it. It's checked in each side's worktree while it is still at the judged head, and in the judge worktree for base.
+- [ ] **Link format:** `#ref/<label|base>/<sha>/<line>-<end>/<path>`. It's a plain markdown link, so `report.md` stays readable outside the GUI, and DOMPurify allows `#` links. Runs judged before this change have no `evidenceRefs` and fall back to the better-side behaviour.
+- [ ] **The apply step's excerpt of the other diff** now uses the resolved refs: files cited on the other side by the approved items.

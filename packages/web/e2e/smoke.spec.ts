@@ -37,7 +37,8 @@ test.beforeAll(async () => {
   const verdict = {
     summary: "Both add div; one guards against division by zero.",
     items: [
-      { aspect: "zero guard", betterSide: "A", evidence: ["math.js:3"], recommendation: "guard b === 0", risk: "low" },
+      // cites the better side (math.js:3) and the losing side's own copy of side.js
+      { aspect: "zero guard", betterSide: "A", evidence: ["math.js:3", "B: side.js:1"], recommendation: "guard b === 0", risk: "low" },
       { aspect: "naming", betterSide: "B", evidence: ["math.js:1"], recommendation: "keep names", risk: "" },
     ],
   };
@@ -50,6 +51,7 @@ test.beforeAll(async () => {
             ? { structured: verdict }
             : {
                 actions: [
+                  { writeFile: { path: "side.js", content: `// side file by ${id}\n` } },
                   {
                     writeFile: {
                       path: "math.js",
@@ -115,6 +117,18 @@ test("runs list → run → Monaco diff → approve one item → state updates",
   await expect(dialog.getByRole("link", { name: /^Open in VS Code: .* worktree$/ })).toHaveAttribute("href", /^vscode:\/\/file\/.+math\.js:3$/);
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
+
+  // a ref into the losing side (item 1 is better on A, cites B's side.js) shows B's own file
+  const sidesText = await page.getByText(/A = \w+, B = \w+\./).textContent();
+  const [, aWorker, bWorker] = /A = (\w+), B = (\w+)\./.exec(sidesText ?? "")!;
+  await page.locator("a.ref", { hasText: "side.js:1" }).first().click();
+  const losing = page.getByRole("dialog", { name: "side.js:1" });
+  await expect(losing).toBeVisible();
+  await expect(losing.locator(".monaco-editor")).toContainText(`side file by ${bWorker}`);
+  await expect(losing.locator(".monaco-editor")).not.toContainText(`side file by ${aWorker}`);
+  await expect(losing.getByText(new RegExp(`${bWorker} \\(\\w+\\) head at judging`))).toBeVisible();
+  await expect(losing.getByRole("link", { name: new RegExp(`^Open in VS Code: ${bWorker} \\(\\w+\\) worktree$`) })).toBeVisible();
+  await page.keyboard.press("Escape");
 
   await page.getByRole("checkbox", { name: "approve item 1" }).check();
   await page.getByRole("button", { name: "Approve 1 item(s) and resume" }).click();

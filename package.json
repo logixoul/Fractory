@@ -9,7 +9,7 @@
     "node": ">=22.19"
   },
   "scripts": {
-    "typecheck": "tsc -p packages/shared/tsconfig.json && tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.test.json && tsc -p packages/cli/tsconfig.test.json && tsc -p packages/daemon/tsconfig.test.json && npm run -w @fractory/web check",
+    "typecheck": "tsc -p packages/shared/tsconfig.json && tsc -p packages/shared/tsconfig.test.json && tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.test.json && tsc -p packages/cli/tsconfig.test.json && tsc -p packages/daemon/tsconfig.test.json && npm run -w @fractory/web check",
     "build": "tsc -p packages/shared/tsconfig.json && tsc -p packages/core/tsconfig.json && tsc -p packages/daemon/tsconfig.json && tsc -p packages/cli/tsconfig.json && npm run -w @fractory/web build",
     "test": "vitest run",
     "smoke": "npm run build && node scripts/smoke-real.mjs",

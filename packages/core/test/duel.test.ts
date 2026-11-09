@@ -16,6 +16,7 @@ const FILES = {
   "math.js": "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n",
   "check.cjs": "const s = require('fs').readFileSync('math.js', 'utf8');\nif (!s.includes('div')) { console.error('FAIL: div missing'); process.exit(1); }\nconsole.log('ok');\n",
   ".gitignore": "node_modules/\n",
+  "old.js": "// legacy\n",
 };
 const WITH_DIV = FILES["math.js"] + "// Written by Claude\nexport const div = (a, b) => a / b;\n";
 
@@ -233,6 +234,64 @@ describe("duel workflow", () => {
     expect(st.status).toBe("completed");
     expect(st.steps.apply!.result).toMatchObject({ skipped: true });
     expect(fs.readFileSync((st.result as { reportMd: string }).reportMd, "utf8")).toContain("No robust preferences");
+  });
+
+  it("resolves each evidence ref to its own side and commit (better side, other side, base, ambiguous)", async () => {
+    const { data, run } = await setup({ checks: [] });
+    // each contestant adds its own file, keeps math.js, deletes old.js (which exists only at base)
+    const impl = (id: string) => (): FakeScript => ({
+      actions: [{ writeFile: { path: `${id}.js`, content: `// by ${id}\n` } }, { writeFile: { path: "math.js", content: WITH_DIV } }, { removeFile: "old.js" }],
+      finalText: "done",
+    });
+    // The judge learns which contestant is A from its diff input (the A/B order is seeded).
+    const glm = new FakeWorker("glm", (t) => {
+      const diffA = fs.readFileSync(path.join(t.inputsDir!, "diff-A.patch"), "utf8");
+      const [aFile, bFile] = diffA.includes("opus.js") ? ["opus.js", "deepseek.js"] : ["deepseek.js", "opus.js"];
+      return {
+        structured: {
+          summary: "s",
+          items: [
+            { aspect: "structure", betterSide: "A", evidence: [`${aFile}:1`, `${bFile}:1`, "B: math.js:1", "math.js:2", "old.js:1"], recommendation: "keep it", risk: "" },
+            { aspect: "guard", betterSide: "A", evidence: ["math.js:1"], recommendation: "copy the guard from side B", risk: "" },
+          ],
+        },
+      };
+    });
+    const st = await driveRun(run, { dataDir: data, workers: { opus: worker("opus", { implement: impl("opus") }), deepseek: worker("deepseek", { implement: impl("deepseek") }), glm } });
+    expect(st.status).toBe("awaiting_approval");
+    const j = st.steps.judge!.result as { sides: Record<"A" | "B", { label: string; workerId: string }>; heads: Record<string, string>; items: JudgeItem[] };
+    const setupRes = st.steps.setup!.result as DuelSetup;
+    const la = j.sides.A.label;
+    const lb = j.sides.B.label;
+    const [one, two] = j.items as [JudgeItem, JudgeItem];
+    const byRaw = Object.fromEntries(one.evidenceRefs.map((r) => [r.raw, r]));
+    const aFile = `${j.sides.A.workerId}.js:1`;
+    const bFile = `${j.sides.B.workerId}.js:1`;
+    // the better side's own file
+    expect(byRaw[aFile]).toMatchObject({ side: "A", label: la, sha: j.heads[la], ambiguous: false, chosenBy: "only" });
+    // the other (losing) side's file: its own side and commit, not the item's better side
+    expect(byRaw[bFile]).toMatchObject({ side: "B", label: lb, sha: j.heads[lb], ambiguous: false, chosenBy: "only" });
+    // resolves everywhere: the evidence text names B
+    expect(byRaw["math.js:1"]).toMatchObject({ side: "B", sha: j.heads[lb], ambiguous: true, chosenBy: "evidence", resolvedIn: ["A", "B", "base"] });
+    // resolves everywhere, nothing named: the item's better side
+    expect(byRaw["math.js:2"]).toMatchObject({ side: "A", sha: j.heads[la], ambiguous: true, chosenBy: "better" });
+    // only at base (deleted by both)
+    expect(byRaw["old.js:1"]).toMatchObject({ side: "base", sha: setupRes.base, ambiguous: false, chosenBy: "only" });
+    expect(byRaw["old.js:1"]!.label).toBeUndefined();
+    // item text names side B
+    expect(two.evidenceRefs[0]).toMatchObject({ side: "B", label: lb, ambiguous: true, chosenBy: "item" });
+
+    // report.md links each ref to its own side and commit
+    approveRun(store().open(run.runId), []);
+    const done = await driveRun(store().open(run.runId), { dataDir: data, workers: { opus: worker("opus", {}), deepseek: worker("deepseek", {}), glm } });
+    const report = fs.readFileSync((done.result as { reportMd: string }).reportMd, "utf8");
+    expect(report).toContain(`[${bFile}](#ref/${lb}/${j.heads[lb]}/1-1/${j.sides.B.workerId}.js) (B, ${j.sides.B.workerId} @ ${j.heads[lb]!.slice(0, 7)})`);
+    expect(report).toContain(`[old.js:1](#ref/base/${setupRes.base}/1-1/old.js) (base @ ${setupRes.base.slice(0, 7)})`);
+    expect(report).toContain("ambiguous");
+
+    function store() {
+      return new RunStore(data, new Redactor());
+    }
   });
 
   it("the judge result records each side's head commit as judged (refs point there)", async () => {

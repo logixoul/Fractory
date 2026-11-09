@@ -1,4 +1,5 @@
 import type { RunState } from "./types.js";
+import type { RefLink, ResolvedRef } from "@fractory/shared/refs";
 import { vscodeHref, type RefHit } from "./refs.js";
 
 /**
@@ -63,11 +64,26 @@ export function refContext(st: RunState, o: { label?: string; rev?: string; revT
   const ctx: RefContext = { runId: st.runId, rev, revTitle: o.revTitle ?? "base commit", repo: st.repo, roots };
   if (wtPath && !st.cleaned && label) {
     const who = st.labels[label] ? `${st.labels[label]} (${label})` : `judge (${label})`;
-    // Consensus worktrees never move off the base; duel worktrees may get later commits.
-    const atRev = st.workflow === "consensus" || (rev !== "base" && rev === latestHead(st, label));
+    // Consensus worktrees and the judge worktree never move off the base; contestant worktrees
+    // in a duel may get later commits.
+    const isBase = rev === "base" || rev === setup?.base;
+    const atRev = st.workflow === "consensus" || (isBase ? !latestHead(st, label) : rev === latestHead(st, label));
     ctx.worktree = { path: wtPath, label: who, atRev };
   }
   return ctx;
+}
+
+/** Context for a resolved-ref link (`#ref/<label|base>/<sha>/…`): that side's worktree and commit. */
+export function linkContext(st: RunState, link: RefLink): RefContext {
+  if (!link.label) return refContext(st, { rev: link.sha, revTitle: "base commit" });
+  const who = `${st.labels[link.label] ?? link.label} (${link.label})`;
+  return refContext(st, { label: link.label, rev: link.sha, revTitle: `${who} head at judging` });
+}
+
+/** A ref found in an item's prose: use the item's resolved evidence for the same path/line, if any. */
+export function contextFromEvidence(st: RunState, evidence: readonly ResolvedRef[], hit: RefHit): RefContext | undefined {
+  const r = evidence.find((e) => e.path === hit.path && e.line === hit.line) ?? evidence.find((e) => e.path === hit.path);
+  return r ? linkContext(st, { sha: r.sha, line: r.line, path: r.path, ...(r.label ? { label: r.label } : {}) }) : undefined;
 }
 
 /** Most recent commit recorded for a contestant's worktree (implement/fix/apply/refix results). */

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { postJson } from "../lib/api.js";
   import type { RunState } from "../lib/types.js";
-  import { refContext } from "../lib/refctx.js";
+  import { evidenceMarkdown, type RefLink, type ResolvedRef } from "@fractory/shared/refs";
+  import { contextFromEvidence, linkContext, refContext } from "../lib/refctx.js";
   import Markdown from "./Markdown.svelte";
 
   let { state: st, onAct, onRefresh, busy }: { state: RunState; onAct: (path: string, body?: unknown) => Promise<void>; onRefresh: () => Promise<void>; busy: boolean } = $props();
@@ -12,6 +13,8 @@
     betterWorker: string;
     betterLabel: string;
     evidence: string[];
+    /** Absent in runs judged before per-ref resolution existed. */
+    evidenceRefs?: ResolvedRef[];
     recommendation: string;
     risk: string;
   }
@@ -22,8 +25,11 @@
   const approved = $derived(st.approval?.approvedItemIds ?? null);
   const result = $derived((st.result ?? {}) as { decisionMd?: string; reportMd?: string });
 
-  // A duel item's evidence refers to the better side's code as the judge saw it (its head then).
-  const itemRefs = (it: Item) => {
+  // Each evidence ref carries its own resolved side and commit (recorded by the orchestrator);
+  // links, the file view and "Open in VS Code" use those, never just the item's better side.
+  const toLink = (link: RefLink) => linkContext(st, link);
+  // Refs in an item's prose: the item's resolved evidence for the same file, else its better side's head.
+  const proseRefs = (it: Item) => {
     const heads = (judge?.heads as Record<string, string> | undefined) ?? {};
     const rev = heads[it.betterLabel];
     return refContext(st, rev ? { label: it.betterLabel, rev, revTitle: `${it.betterWorker} (${it.betterLabel}) head at judging` } : { label: it.betterLabel });
@@ -74,9 +80,9 @@
             <td>{i + 1}</td>
             <td>{it.aspect}</td>
             <td><b>{it.betterSide}</b> <span class="muted">({it.betterWorker})</span></td>
-            <td><Markdown text={it.recommendation} refs={itemRefs(it)} /></td>
+            <td><Markdown text={it.recommendation} refs={proseRefs(it)} resolveHit={(hit) => contextFromEvidence(st, it.evidenceRefs ?? [], hit)} /></td>
             <td>{it.risk}</td>
-            <td><Markdown text={it.evidence.map((e) => `\`${e}\``).join(", ")} refs={itemRefs(it)} /></td>
+            <td><Markdown text={evidenceMarkdown(it.evidence, it.evidenceRefs ?? [], st.labels)} refs={proseRefs(it)} onRefLink={toLink} /></td>
           </tr>
         {/each}
       </tbody>
@@ -93,7 +99,7 @@
     {/if}
   </section>
   {#if result.reportMd}
-    <section class="panel report"><Markdown runId={st.runId} file={result.reportMd} refs={refContext(st)} /></section>
+    <section class="panel report"><Markdown runId={st.runId} file={result.reportMd} refs={refContext(st)} onRefLink={toLink} /></section>
   {/if}
 {/if}
 

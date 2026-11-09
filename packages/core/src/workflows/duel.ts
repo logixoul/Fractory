@@ -13,7 +13,8 @@ import { DuelVerdict } from "../schemas/outputs.js";
 import type { RunState } from "../state/reducer.js";
 import { leakCheck, relativizePaths } from "../text/anonymize.js";
 import { loadProjectContext } from "../text/context.js";
-import { checkRefs } from "../text/refs.js";
+import { evidenceMarkdown, sideMentioned, type ResolvedRef } from "@fractory/shared/refs";
+import { checkRefs, extractRefs } from "../text/refs.js";
 import { randomHex, seededShuffle } from "../util/random.js";
 import { identityTokenWarning, judgeScrubber, labelsOf, promptText, res, runSwapPass, writeInput, writeOut } from "./common.js";
 
@@ -67,6 +68,8 @@ export interface JudgeItem {
   evidence: string[];
   recommendation: string;
   risk: string;
+  /** Each evidence ref, resolved against the code the judge saw (side A/B head or base). */
+  evidenceRefs: ResolvedRef[];
 }
 
 export interface DuelJudgeResult {
@@ -497,7 +500,18 @@ function judgeStep(env: DuelEnv, st: RunState, setup: DuelSetup, maxFix: number)
             bad = duelEvidence(r.value, cwd, evidenceRoots);
           }
           if (bad.unsupported.length > 0) throw new StepFailure("exit_check", `judge items without valid evidence: ${bad.unsupported.join("; ")}`);
-          let items: JudgeItem[] = r.value.items.map((it) => ({ ...it, betterLabel: sides[it.betterSide].label, betterWorker: sides[it.betterSide].workerId }));
+          const headsAB = { A: chains[la]!.head!.head, B: chains[lb]!.head!.head };
+          const resolveOpts = {
+            roots: { A: setup.worktrees[la]!, B: setup.worktrees[lb]!, base: cwd },
+            labels: { A: la, B: lb },
+            shas: { ...headsAB, base: setup.base },
+          };
+          let items: JudgeItem[] = r.value.items.map((it) => ({
+            ...it,
+            betterLabel: sides[it.betterSide].label,
+            betterWorker: sides[it.betterSide].workerId,
+            evidenceRefs: resolveEvidence(it, resolveOpts),
+          }));
           let dropped: JudgeItem[] = [];
           if (swapped) {
             const ratings = await runSwapPass(ctx, {
@@ -530,6 +544,50 @@ function judgeStep(env: DuelEnv, st: RunState, setup: DuelSetup, maxFix: number)
       );
     },
   };
+}
+
+/**
+ * Resolves every evidence ref of an item against the code the judge saw: side A's head, side
+ * B's head (their worktrees, still at those heads while judging) and the base (judge worktree).
+ * When a ref resolves in more than one place: the side the evidence text names, then the side
+ * the item text names, then the item's better side, then base; and it is marked ambiguous.
+ */
+export function resolveEvidence(
+  item: { evidence: string[]; aspect: string; recommendation: string; risk: string; betterSide: "A" | "B" },
+  o: { roots: Record<"A" | "B" | "base", string>; labels: Record<"A" | "B", string>; shas: Record<"A" | "B" | "base", string> },
+): ResolvedRef[] {
+  const out: ResolvedRef[] = [];
+  const itemSide = sideMentioned([item.aspect, item.recommendation, item.risk].join("\n"));
+  const order: ("A" | "B" | "base")[] = ["A", "B", "base"];
+  for (const ev of item.evidence) {
+    const evSide = sideMentioned(ev);
+    for (const r of extractRefs(ev)) {
+      const hits = order.filter((side) => checkRefs(r.raw, o.roots[side]).valid.length > 0);
+      if (hits.length === 0) continue; // unresolvable: listed in invalidEvidence
+      const pick = (side: "A" | "B" | "base" | undefined): boolean => side !== undefined && hits.includes(side);
+      let side: "A" | "B" | "base";
+      let chosenBy: ResolvedRef["chosenBy"];
+      if (hits.length === 1) [side, chosenBy] = [hits[0]!, "only"];
+      else if (pick(evSide)) [side, chosenBy] = [evSide!, "evidence"];
+      else if (pick(itemSide)) [side, chosenBy] = [itemSide!, "item"];
+      else if (pick(item.betterSide)) [side, chosenBy] = [item.betterSide, "better"];
+      else [side, chosenBy] = ["base", "base"];
+      const valid = checkRefs(r.raw, o.roots[side]).valid[0]!;
+      out.push({
+        raw: r.raw,
+        path: valid.path!,
+        line: r.line,
+        ...(r.endLine !== undefined ? { endLine: r.endLine } : {}),
+        side,
+        ...(side !== "base" ? { label: o.labels[side] } : {}),
+        sha: o.shas[side],
+        ambiguous: hits.length > 1,
+        chosenBy,
+        resolvedIn: hits,
+      });
+    }
+  }
+  return out;
 }
 
 /** An item's evidence is valid if it resolves in either side's final worktree (or the base). */
@@ -574,9 +632,8 @@ function applyStep(env: DuelEnv, st: RunState, setup: DuelSetup, judge: DuelJudg
         .join("\n\n");
       const other = chainOf(st, otherLabel, maxFix);
       const otherDiff = await squashedDiff(setup.worktrees[otherLabel]!, setup.base, other.head!.head);
-      const evidenceFiles = items
-        .filter((it) => it.betterLabel !== label)
-        .flatMap((it) => checkRefs(it.evidence.join("\n"), setup.worktrees[otherLabel]!).valid.map((r) => r.path!));
+      // Files the approved items cite in the other implementation (per-ref resolution).
+      const evidenceFiles = items.flatMap((it) => it.evidenceRefs.filter((r) => r.label === otherLabel).map((r) => r.path));
       const files = {
         items: writeInput(ctx, "approved-items.md", `# Approved items\n\n${itemsMd}\n`),
         diff: writeInput(ctx, "other-diff.patch", diffExcerpt(otherDiff, evidenceFiles)),
@@ -623,7 +680,7 @@ function reportStep(st: RunState, setup: DuelSetup, maxFix: number): WorkStep {
         if (judge.noRobustPreferences) lines.push("No robust preferences: with A and B swapped, the judge agreed with none of its first-pass items, so there was nothing to approve.", "");
         judge.items.forEach((it, i) => {
           const mark = apply?.approvedItemIds.includes(i + 1) ? "[x]" : "[ ]";
-          lines.push(`${mark} **${i + 1}. ${it.aspect}**: better ${it.betterSide} (${it.betterWorker}). ${it.recommendation} *Risk:* ${it.risk || "none stated"}. Evidence: ${it.evidence.map((e) => `\`${e}\``).join(", ")}`);
+          lines.push(`${mark} **${i + 1}. ${it.aspect}**: better ${it.betterSide} (${it.betterWorker}). ${it.recommendation} *Risk:* ${it.risk || "none stated"}. Evidence: ${evidenceMarkdown(it.evidence, it.evidenceRefs, st.labels)}`);
         });
         if (judge.droppedBySwapPass.length) {
           lines.push("", "Dropped by the swapped-order pass:", ...judge.droppedBySwapPass.map((it) => `- ${it.aspect}: ${it.recommendation}`));
