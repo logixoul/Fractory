@@ -120,7 +120,7 @@ export const Config = z
     judge: z
       .object({
         /** Judge a second time with A/B swapped; keep only what both passes agree on. */
-        swapOrderPass: z.boolean().default(false),
+        swapOrderPass: z.boolean().default(true),
       })
       .prefault({}),
     retry: z
@@ -129,6 +129,11 @@ export const Config = z
         transientMaxRetries: z.number().int().min(0).max(5).default(2),
         /** Backoff before retry n (the last value repeats). */
         backoffMs: z.array(z.number().int().nonnegative()).min(1).default([5_000, 30_000]),
+        /**
+         * Backoff for a provider rate limit (429) that Pi's own retries did not absorb. A
+         * Retry-After in the error text takes precedence over both lists.
+         */
+        rateLimitBackoffMs: z.array(z.number().int().nonnegative()).min(1).default([60_000, 120_000]),
       })
       .prefault({}),
     anonymize: z
@@ -172,7 +177,8 @@ export const DEFAULT_CONFIG_INPUT = {
     // Baseten's "Fast" variant: same weights, dedicated capacity for higher throughput, 2× price.
     deepseek: { kind: "pi", provider: "baseten", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast", thinking: "medium" },
     // Judge from a third model family (not a contestant), to avoid self-preference; Flash for cost.
-    glm: { kind: "pi", provider: "baseten", model: "zai-org/GLM-5.3-Flash", thinking: "medium" },
+    // "high", explicitly: GLM-5.3 Flash on Baseten has low/high/max only (Pi would map medium to high).
+    glm: { kind: "pi", provider: "baseten", model: "zai-org/GLM-5.3-Flash", thinking: "high" },
   },
   roles: { contestants: ["opus", "deepseek"], judge: "glm" },
   prices: {
@@ -181,6 +187,18 @@ export const DEFAULT_CONFIG_INPUT = {
   },
 } satisfies ConfigInput;
 
+/**
+ * Reasoning levels Pi can really send for a provider/model, with what it sends instead of an
+ * unsupported one. From Pi's model catalog (thinkingLevelMap; Pi 1.5.0, checked 2026-11-09) and,
+ * for Together, the M0 spike. Unlisted models are not checked; the effective level is still
+ * logged per step and a mismatch is a run warning.
+ */
+export const PI_THINKING_LEVELS: readonly { provider: string; model: RegExp; levels: readonly string[]; otherwise: string }[] = [
+  { provider: "together", model: /DeepSeek-V4(\.1)?-Flash/i, levels: ["off", "high"], otherwise: "high" },
+  { provider: "baseten", model: /^zai-org\/GLM-5\.3-Flash$/i, levels: ["low", "high", "max"], otherwise: "the next supported level (medium → high)" },
+  { provider: "baseten", model: /^deepseek-ai\/DeepSeek-V4\.1-Flash/i, levels: ["off", "low", "medium", "high", "max"], otherwise: "the next supported level" },
+];
+
 /** Non-fatal advice about a valid config. */
 export function configWarnings(c: Config): string[] {
   const out: string[] = [];
@@ -188,10 +206,9 @@ export function configWarnings(c: Config): string[] {
     out.push(`roles.judge '${c.roles.judge}' is also a contestant; its judgments may favour its own work`);
   }
   for (const [id, w] of Object.entries(c.workers)) {
-    // Verified in M0 on Together only: Pi clamps every level but off/high to high for this model.
-    // On other providers the effective level is logged per step (message_end.thinkingLevel).
-    if (w.kind === "pi" && w.provider === "together" && /DeepSeek-V4(\.1)?-Flash/i.test(w.model) && w.thinking !== "off" && w.thinking !== "high") {
-      out.push(`workers.${id}.thinking='${w.thinking}' is clamped to 'high' by Pi for ${w.model} on Together; use 'off' or 'high'`);
+    const known = w.kind === "pi" ? PI_THINKING_LEVELS.find((k) => k.provider === w.provider && k.model.test(w.model)) : undefined;
+    if (w.kind === "pi" && known && !known.levels.includes(w.thinking)) {
+      out.push(`workers.${id}.thinking='${w.thinking}' is not supported by ${w.model} on ${w.provider} (${known.levels.join("/")}); Pi uses ${known.otherwise} instead`);
     }
     if (w.kind === "pi" && !c.prices[`${w.provider}/${w.model}`]) {
       out.push(`workers.${id}: no price for '${w.provider}/${w.model}'; its cost will be reported as unknown`);

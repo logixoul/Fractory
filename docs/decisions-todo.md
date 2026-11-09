@@ -14,7 +14,7 @@ Binding requirements you already set (docs/interfaces.md §8) are not repeated h
 - [x] **Pi reasoning: only `off` and `high` are effective for this model.** Pi clamps every other level to `high`. Config accepts all levels, but warns on anything other than `off`/`high`. The default is `high`.
 - [x] **Claude effort is logged as requested only.** Claude Code never reports the effective effort, so `effectiveReasoning` is `null` for Claude steps. The default effort is `high`.
 - [x] **Project-context parity: both harnesses load no project context.** Claude runs with `--setting-sources ""`; Pi runs with `--no-context-files` and an empty, isolated agent dir. The orchestrator injects the same text into both prompts: by default, the repo-root `AGENTS.md` and `CLAUDE.md` if present.
-- [x] **Pi's internal retries are disabled**, so every retry is the orchestrator's decision. The orchestrator now retries transient errors itself, with backoff (see M1 *(changed in review)*).
+- [x] ~~**Pi's internal retries are disabled**, so every retry is the orchestrator's decision. The orchestrator now retries transient errors itself, with backoff (see M1 *(changed in review)*).~~ **Changed (review 2026-11-09):** Pi's own retries are on, for provider rate limits and 5xx, and the step retry is the last resort. See "Review of open items" at the end and `docs/interfaces.md` §2 "Retries".
 - [x] **Quota detection** *(changed in review)*:
   - Signals: a `rate_limit_event.status` other than `allowed`/`allowed_warning`, or Claude `api_error_status` 429.
   - **Text matching** (`usage limit|rate limit|quota|429|…`) applies **only to a result with `is_error === true`**. Successful model output is never text-matched. Test: a successful result that discusses rate limiting doesn't pause.
@@ -213,13 +213,14 @@ Per-ref resolution, implementation choices (open):
 
   Only capital A/B count, so the article "A …" isn't a side. A text that names both sides names neither.
   - *Alternative:* ask the judge for `side` per evidence entry in the schema. More reliable, but it changes the judge's output format.
+  - **Superseded (review 2026-11-09):** the judge now declares `side` per evidence entry. `sideMentioned` is only a fallback for runs judged before that (see "Review of open items" below).
 - [ ] **"Resolves" means the same rule as everywhere else:** the file exists at that commit and the line or range is within it. It's checked in each side's worktree while it is still at the judged head, and in the judge worktree for base.
 - [ ] **Link format:** `#ref/<label|base>/<sha>/<line>-<end>/<path>`. It's a plain markdown link, so `report.md` stays readable outside the GUI, and DOMPurify allows `#` links. Runs judged before this change have no `evidenceRefs` and fall back to the better-side behaviour.
 - [ ] **The apply step's excerpt of the other diff** now uses the resolved refs: files cited on the other side by the approved items.
 
 ## M7
 
-- [ ] **CI tests Node 22 only.** It is the minimum supported major version; adding newer versions would increase runtime and coverage of newer Node behavior.
+- [x] ~~**CI tests Node 22 only.**~~ **Changed (review 2026-11-09):** the matrix is Node 22 and Node 24 on all three OSes (6 jobs). Playwright trace artifacts are named per OS and Node version.
 - [ ] **Audit fails at moderate severity.** Two known low-severity `deepmerge` findings remain in build dependencies; lowering the threshold would make CI fail until they are resolved.
 - [ ] **Run the GUI smoke test on all three operating systems using preinstalled Chrome.** This exercises the packaged GUI without downloading a browser; changing browser or installation strategy affects portability and CI duration.
 - [ ] **Pin GitHub Actions to major version tags.** This receives updates within each major version; pinning commit SHAs would make action dependencies immutable but require explicit updates.
@@ -234,5 +235,35 @@ Requested: Baseten instead of Together; the DeepSeek "Fast" variant; GLM-5.3 Fla
 - [ ] **Prices come from Baseten's `/v1/models` catalog** (its `pricing` field, checked 2026-11-09), because the pricing web page is JavaScript-rendered. No cache-write price is listed; as before, cost becomes unknown only if a cache-write token count appears.
 - [ ] **The Together price entries were removed** from the defaults. A config that switches a worker back to Together must add its own `prices`. The Together-specific thinking-clamp warning is kept for that case.
 - [ ] **Medium reasoning everywhere:** Claude `effort: "medium"`, Pi `thinking: "medium"` for both Pi workers. These are both the schema defaults and the built-in worker defaults, so a worker declared without a level also gets medium. The smoke script now uses the defaults too, so it costs slightly more than before (it previously used `low`/`off`).
-- [ ] **Whether `medium` is effective on Baseten is unverified.** On Together, only `off`/`high` worked for DeepSeek. The effective level is logged per step; run the smoke script and check `effectiveReasoning`.
+- [x] ~~**Whether `medium` is effective on Baseten is unverified.**~~ Verified by the smoke run: DeepSeek runs at `medium`. GLM-5.3 Flash has only low/high/max, so Pi sent `high`; the judge is now set to `high` explicitly (see below).
 - [ ] **Pi's `passEnv` default is now `["BASETEN_API_KEY"]`.** A `TOGETHER_API_KEY` in your shell is no longer passed to Pi unless you add it to `passEnv`, or put it in the envFile.
+
+## Review of open items and smoke follow-ups (2026-11-09)
+
+Requested: Pi request-level retries for rate limits; a declared `side` per judge evidence entry; CI on Node 22 and 24; `judge.swapOrderPass` on by default. Then, after the Baseten smoke run: the judge's thinking explicitly `high`, and an investigation of unreported reasoning tokens (findings in `docs/interfaces.md` §2 "Baseten reasoning tokens").
+
+- [ ] **Both of Pi's retry levels are enabled, 4 retries each.** The request asked for retries that honour Retry-After *and* emit `auto_retry_*` events, but no single Pi level does both: the provider level honours Retry-After but emits nothing; the agent level emits events but ignores Retry-After.
+  - Provider level: `maxRetries: 4`, `maxRetryDelayMs: 60000`.
+  - Agent level: `maxRetries: 4`, backoff 2, 4, 8, 16 s, capped at 60 s.
+  - Worst case is 25 HTTP attempts per turn, and provider-level retries never show in the live view.
+  - *Alternative:* agent level only (every retry visible, Retry-After ignored), or provider level with fewer retries.
+- [ ] **`provider_retry` WorkerEvent** with `phase: "scheduled" | "finished"`, `attempt`, `maxAttempts`, `delayMs`, `success` and `message` (truncated to 1000 chars). The CLI prints it, the GUI shows it as an amber "↻" line, and a final failure shows as an error line. Step retries (`step_retrying`) now also print in the CLI, which they didn't before.
+- [ ] **Step retry delay** (`stepRetryDelayMs`):
+  - A Retry-After in the error text comes first, capped at 15 minutes. It matches Pi's `Server requested Ns retry delay`, `retry-after-ms`, `Retry-After: N` (seconds) and "try again in N s/min".
+  - Otherwise a rate limit uses the new `retry.rateLimitBackoffMs` (default 60 s, then 120 s), and anything else uses `retry.backoffMs` (5 s, then 30 s).
+  - It reads only the final error message: Pi's headers aren't visible to the orchestrator.
+- [ ] **Evidence side is in the duel verdict schema:** each evidence entry is `{ref, side: "A"|"B"|"base"}`. `JudgeItem.evidence` stays a `string[]` of the refs, so the GUI, CLI and old runs are unchanged.
+- [ ] **Side mismatch handling.**
+  - **The check:** an entry whose ref exists, but not in its declared side, is a mismatch.
+  - **The repair turn:** mismatches trigger the one repair turn, shared with the existing "item without valid evidence" repair, so a single prompt lists both problems.
+  - **After the repair:** an item with no ref resolving in its declared side fails the step, as before. A ref that still mismatches but sits in an item that also has valid evidence doesn't fail it: that ref is not linked (shown as "unresolved"), and it's recorded in `evidenceSideMismatches` with an `evidence_side_mismatch` warning.
+  - *Alternative:* fail the step on any remaining mismatch.
+- [ ] **A declared side wins even when the ref also exists elsewhere** (`chosenBy: "declared"`, still marked `ambiguous`). The text inference is used only for plain-string entries.
+- [ ] **`judge.swapOrderPass` defaults to `true`.** This doubles judge calls per run (GLM-5.3 Flash, cheap). The test helpers set it to `false` for tests that aren't about the swap pass; the swap tests set it explicitly.
+- [ ] **Judge thinking is `high`, set explicitly.** GLM-5.3 Flash on Baseten has low/high/max. Medium isn't one of them, so Pi already sent `high`.
+- [ ] **Reasoning level warnings, in two places:**
+  - A config warning from a small built-in table of what each known model supports. It was copied from Pi 1.5.0's catalog `thinkingLevelMap` plus the Together spike, so it can go stale when Pi updates.
+  - A run warning, `reasoning_level_mismatch`, whenever a step's effective level differs from the requested one. This holds for any model.
+- [ ] **No reasoning-token estimate was added.** The probe showed that Baseten reports `reasoning_tokens`, that they're included in `completion_tokens`, and that Pi maps them into `usage.reasoning` and `usage.output`. Cost therefore already covers them. Both models reported 0 because they didn't reason on the smoke prompt. The 75 s GLM turn was latency on Baseten's side, not hidden thinking. Billing was inferred from the usage fields, not checked against an invoice.
+  - fractory has no budget cap today, so there was nothing to switch to an estimate.
+- [ ] **Not done:** recording receive timestamps in the raw stream files. With them, time-to-first-delta could be measured afterwards; without them, only Pi's per-message `durationMs` is available.

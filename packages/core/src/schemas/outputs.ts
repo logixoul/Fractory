@@ -45,6 +45,18 @@ export const ConsensusVerdict = z
   .strict();
 export type ConsensusVerdict = z.infer<typeof ConsensusVerdict>;
 
+/**
+ * One duel evidence entry: a ref and the version it points into. The orchestrator checks that
+ * the ref really resolves in the declared side (mismatch → one repair turn).
+ */
+export const DuelEvidence = z
+  .object({
+    ref: z.string().min(1).describe("one repo-relative path:line or path:start-end reference"),
+    side: z.enum(["A", "B", "base"]).describe("the version the ref points into: A's implementation, B's implementation, or the base commit"),
+  })
+  .strict();
+export type DuelEvidence = z.infer<typeof DuelEvidence>;
+
 /** Judge output for the duel (M4). */
 export const DuelVerdict = z
   .object({
@@ -55,7 +67,7 @@ export const DuelVerdict = z
           .object({
             aspect: z.string().min(1),
             betterSide: Side,
-            evidence: z.array(z.string()).min(1),
+            evidence: z.array(DuelEvidence).min(1),
             recommendation: z.string().min(1),
             risk: z.string(),
           })

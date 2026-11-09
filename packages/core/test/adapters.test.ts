@@ -147,6 +147,22 @@ describe("Pi argv and stream parser", () => {
     expect(evs.at(-1)).toMatchObject({ type: "done" });
   });
 
+  it("maps Pi's auto_retry_start/end to provider_retry events (docs/json.md shapes)", () => {
+    const p = new PiStreamParser(meta);
+    const evs = [
+      ...p.record({ type: "auto_retry_start", attempt: 1, maxAttempts: 4, delayMs: 2000, errorMessage: "429 Too Many Requests" }),
+      ...p.record({ type: "auto_retry_end", success: true, attempt: 2 }),
+      ...p.record({ type: "auto_retry_end", success: false, attempt: 4, finalError: "503 overloaded" }),
+    ];
+    for (const e of evs) WorkerEvent.parse(e);
+    expect(evs).toEqual([
+      { type: "provider_retry", phase: "scheduled", attempt: 1, maxAttempts: 4, delayMs: 2000, message: "429 Too Many Requests" },
+      { type: "provider_retry", phase: "finished", attempt: 2, success: true },
+      { type: "provider_retry", phase: "finished", attempt: 4, success: false, message: "503 overloaded" },
+    ]);
+    expect(p.terminated).toBe(false);
+  });
+
   it("refuses the result when the guard did not acknowledge loading", () => {
     const evs = feed(new PiStreamParser({ ...meta, guardLoaded: () => false }), "pi-hi.jsonl");
     expect(evs.at(-1)).toMatchObject({ type: "error", kind: "protocol", message: expect.stringContaining("path guard") });
@@ -230,7 +246,7 @@ describe("adapters end to end with a fake CLI", () => {
     expect(guard.read).toEqual([cwd, inputsDir]);
     expect(guard.write).toEqual([outFile]);
     expect(JSON.parse(fs.readFileSync(path.join(data, "pi-agent", "settings.json"), "utf8"))).toEqual({
-      retry: { enabled: false, provider: { maxRetries: 0 } },
+      retry: { enabled: true, maxRetries: 4, baseDelayMs: 2000, maxAgentDelayMs: 60000, provider: { maxRetries: 4, maxRetryDelayMs: 60000 } },
     });
     expect(fs.readdirSync(stepDir).filter((f) => f.startsWith("pi-guard-ack"))).toEqual([]);
 

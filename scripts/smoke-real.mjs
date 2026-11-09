@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Opt-in REAL-MODEL smoke test. Never run by `npm test`. You run it by hand:
 //   npm run build && node scripts/smoke-real.mjs [--claude] [--pi] [--glm] [--opus]
-// Default: all three (Claude, and DeepSeek and the GLM-5.3 Flash judge via Pi on Baseten); Claude uses --model haiku (conserve Pro quota), --opus for Opus. All use the default reasoning (medium).
+// Default: all three (Claude, and DeepSeek and the GLM-5.3 Flash judge via Pi on Baseten); Claude uses --model haiku (conserve Pro quota), --opus for Opus. All use the default reasoning (medium; the GLM judge high).
 // Pi needs BASETEN_API_KEY in .dev.vars (repo root). Cost: one tiny call per worker.
 //
 // Each worker gets a read-only task in a fresh worktree of a scratch repo, with a sibling

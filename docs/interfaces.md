@@ -105,7 +105,7 @@ pi --mode json
 env: TOGETHER_API_KEY (from envFile), PI_CODING_AGENT_DIR=<fractory-data>/pi-agent
 ```
 - **Model id:** Pi's catalog lists `deepseek-ai/DeepSeek-V4.1-Flash` (`pi --list-models together`). The spec's `…-Flash-1017` also works. Pi prints `Warning: Model "…-1017" not found for provider "together". Using custom model id.` on stderr and passes it through. Default config uses the spec id; it's configurable.
-- **Isolated agent dir:** `PI_CODING_AGENT_DIR` pointing at a fractory-owned dir with `settings.json` = `{"retry":{"enabled":false,"provider":{"maxRetries":0}}}` works with the env key. Pi creates an empty `auth.json` there and does **not** persist the key. This isolates Pi from your personal Pi config and turns off its internal retries.
+- **Isolated agent dir:** `PI_CODING_AGENT_DIR` pointing at a fractory-owned dir with its own `settings.json` works with the env key. Pi creates an empty `auth.json` there and does **not** persist the key. This isolates Pi from your personal Pi config. (Until 2026-11-09 the settings turned Pi's retries off; see "Retries" below for the current ones.)
 - **Do not pass prompts as `@file`.** Pi wraps `@file` content in `<file name="…">…</file>`, and the model then treats the instructions as untrusted file content. In the spike it refused, calling it "prompt injection". Prompts go via stdin, which arrives as a plain user message.
 
 ### Stream (verified sequence)
@@ -140,7 +140,20 @@ Bad API key → **exit code 0** and:
   "errorMessage":"401: {\"message\":\"Invalid API key provided…\",\"code\":\"invalid_api_key\"}"}}
 {"type":"agent_end","willRetry":false}
 ```
-So the adapter treats `stopReason ∈ {error, aborted, length}` on the last assistant message as failure. The exit code alone isn't enough. A 429 / `rate limit` in `errorMessage` → `rate_limit` WorkerEvent. *Doc-only:* `auto_retry_start/end` events. Retries are disabled in our agent dir.
+So the adapter treats `stopReason ∈ {error, aborted, length}` on the last assistant message as failure. The exit code alone isn't enough. A 429 / `rate limit` in `errorMessage` is a transient error (step retry, below).
+
+### Retries (enabled 2026-11-09, by user request: Baseten Basic tier is 15–120 RPM)
+Read from Pi 1.5.0's source (`pi-ai/dist/utils/retry.js`, `provider-retry.js`, `core/agent-session.js`) and docs (`settings.md`, `json.md`). Pi has two independent levels, and only one of each requested property is available per level:
+
+| Level | Setting (our agent dir) | Retries | Backoff | Retry-After | Visible in `--mode json` |
+|---|---|---|---|---|---|
+| Provider (one HTTP request) | `retry.provider.maxRetries: 4`, `maxRetryDelayMs: 60000` | 429, 408, 409, 5xx, connection errors, before the stream starts (`x-should-retry` honored) | exponential 0.5, 1, 2, 4 s (×0.75–1 jitter, cap 8 s) | **yes**: `retry-after-ms`, `retry-after` (seconds or HTTP date); a requested delay above 60 s fails at once with `Server requested Ns retry delay (max: 60s). …` | no |
+| Agent (the whole turn) | `retry.enabled: true`, `maxRetries: 4`, `baseDelayMs: 2000`, `maxAgentDelayMs: 60000` | an assistant message with `stopReason:"error"` whose text matches Pi's retryable patterns (429, 5xx, rate limit, overloaded, network, dropped streams, "retry delay"). Quota/billing texts (`insufficient_quota`, `quota exceeded`, `billing`, …) are **not** retried. Context overflow is left to compaction. | exponential 2, 4, 8, 16 s | no (the turn has no headers) | **yes**: `auto_retry_start{attempt,maxAttempts,delayMs,errorMessage}`, `auto_retry_end{success,attempt,finalError?}` |
+
+- The adapter maps `auto_retry_start/end` to a `provider_retry` WorkerEvent (`phase: "scheduled"|"finished"`), shown in the CLI progress and the GUI live view. The failed attempt is omitted from the model context by Pi; its `message_end` still arrives and is counted for usage.
+- Worst case per turn: (4 + 1) × (4 + 1) = 25 HTTP attempts, over roughly 2–5 minutes.
+- **Orchestrator step retry stays the last resort** (`retry.transientMaxRetries`, default 2): a Retry-After found in the final error text (including Pi's `Server requested Ns retry delay` message) is honored, capped at 15 min. Otherwise a rate limit (`429` / `rate limit` / `too many requests`) waits `retry.rateLimitBackoffMs` (60 s, then 120 s), and other transient errors wait `retry.backoffMs` (5 s, then 30 s).
+- *Not yet observed with a real call:* the `auto_retry_*` lines (shapes are from `docs/json.md` and the source), and whether Baseten sends `Retry-After` on 429.
 
 ### Filesystem scope (verified, important)
 Pi's built-in tools are **not confined to the cwd**. Without a guard, `read` and `write` on absolute paths outside the worktree both succeeded. Confinement comes from the **fractory path-guard extension** (§8.12, verified below). Pi never gets `bash`/`powershell`, and gets `write` only in steps that need it.
@@ -186,9 +199,45 @@ The spec named Together; the default provider is now **Baseten**. Everything abo
 | Model ids `deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast` (contestant), `zai-org/GLM-5.3-Flash` (judge) | verified in Pi's catalog and in Baseten's `GET https://inference.baseten.co/v1/models` |
 | Prices, USD per 1M (from `/v1/models` `pricing`) | DeepSeek V4.1 Flash 1017 Fast: input 0.60, output 2.40, cache read 0.014. GLM-5.3 Flash: input 0.15, output 0.50, cache read 0.03. No cache-write price listed. |
 | "Fast" variants | Baseten docs: same weights, dedicated capacity for higher throughput, separate price (2× here) and rate limits; falls back to base capacity when Fast capacity is unavailable |
-| Stream shape, `usage`, `message_end.provider` = `baseten`, `stopReason: "error"` on failures | **not yet verified with a real call.** Run `npm run smoke -- --pi --glm` |
-| Effective reasoning for `thinking: "medium"` | **not yet verified.** On Together only `off`/`high` were effective. Each step logs `message_end.thinkingLevel`, and the smoke output prints `effectiveReasoning`. |
-| Rate limits | Baseten tiers (docs): Basic 15–120 RPM / 100k–500k TPM, Pro 120 RPM / 1M TPM. A 429 from a Pi provider is transient (retried with backoff). |
+| Stream shape, `usage`, `message_end.provider` = `baseten` | verified (user's smoke run 2026-11-09; guard, gates and caching OK). `message_end` also carries `durationMs`, `responseId`, `rawStopReason`. `stopReason: "error"` on Baseten not yet observed. |
+| Supported reasoning levels (Pi catalog `thinkingLevelMap`) | DeepSeek V4.1 Flash 1017 (Fast): off(`none`)/low/medium/high/max. GLM-5.3 Flash: **low/high/max** only (no off; Pi sends `high` for medium). Sent as `reasoning_effort` (captured payload). Defaults: DeepSeek `medium`, judge `high` (explicit). |
+| Effective reasoning | verified: `thinkingLevel` = the level Pi sent (`medium` for DeepSeek; `high` for GLM when `medium` was requested). A requested ≠ effective level is a config warning (known models) and a `reasoning_level_mismatch` run warning. |
+| Rate limits | Baseten tiers (docs): Basic 15–120 RPM / 100k–500k TPM, Pro 120 RPM / 1M TPM. Handled by Pi's retries, then the step retry (see "Retries"). |
+
+### Baseten reasoning tokens (probe 2026-11-09, by user request)
+Question: `usage.reasoning` was 0 for both models in the smoke run, while the GLM run took 75 s for ~140 visible output tokens. Are reasoning tokens hidden, unreported or unbilled?
+
+**Smoke run, from the raw streams** (`fractory-smoke-10Mzg6`). The raw files have no per-line receive times, so time to the first text delta can't be measured from them. Pi's per-message `durationMs` and message timestamps give the rest:
+
+| Call | Spawn → `session` | Turn 1 (`durationMs`) | Turn 2 | Total (spawn → last write) | Thinking content | Output tokens (turn 1 + 2) | `reasoning` |
+|---|---|---|---|---|---|---|---|
+| DeepSeek, medium | 0.45 s | 6.99 s (text + 2 tool calls) | 0.39 s | ~7.6 s | none (no `thinking_*` events) | 213 + 94 | 0 + 0 |
+| GLM, medium → high | 0.32 s | **72.8 s** (2 tool calls) | 1.79 s | ~75 s | none | 84 + 57 | 0 + 0 |
+
+**Direct requests.** The probe captured Pi's exact request payload with a `before_provider_request` extension, then replayed the first turn to `https://inference.baseten.co/v1/chat/completions`. The payload was `stream: true`, `stream_options.include_usage`, `max_tokens` = catalog max and `reasoning_effort`, with the smoke prompt, 4 tools and the system prompt. Script: session scratchpad `probe/probe.mjs`; the key came from `.dev.vars` and was never printed.
+
+| Model, `reasoning_effort` | Headers | First reasoning delta | First content / tool delta | Total | Reasoning chars | `completion_tokens` | `reasoning_tokens` |
+|---|---|---|---|---|---|---|---|
+| DeepSeek, `none` | 0.75 s | – | 0.75 s | 0.79 s | 0 | 187 | 0 |
+| DeepSeek, `medium` (as Pi) | 1.22 s | – | 1.22 s | 1.26 s | 0 | 188 | 0 |
+| DeepSeek, `high` | 0.47 s | – | 0.47 s | 0.54 s | 0 | 188 | 0 |
+| DeepSeek, omitted | 1.26 s | – | 1.26 s | 1.35 s | 0 | 188 | 0 |
+| GLM, `low` | 1.12 s | – | 1.13 s | 1.26 s | 0 | 70 | 0 |
+| GLM, `high` (as Pi) | 0.56 s | – | 0.56 s | 2.09 s | 0 | 70 | 0 |
+| GLM, `max` | 0.43 s | 0.43 s | 2.24 s | 2.78 s | 473 | 170 | **100** |
+| GLM, omitted | 5.68 s | 6.64 s | 7.66 s | 13.32 s | 35 | 78 | 8 |
+
+Pi's own runs during the probe (same prompt, Pi defaults then) gave these turn durations: DeepSeek 1.1 s, 1.0 s and 0.6 s (turn 2 had 52 chars of thinking, `reasoning: 11`); GLM 5.2 s and 1.0 s (`reasoning: 0`).
+
+Each `usage` object had `prompt_tokens`, `completion_tokens`, `total_tokens`, `prompt_tokens_details{cached_tokens,audio_tokens[,image_tokens]}` and `completion_tokens_details{reasoning_tokens,accepted_prediction_tokens,rejected_prediction_tokens,audio_tokens}`. The prediction fields come from speculative decoding.
+
+Findings:
+- **Reported by Pi:** yes. Pi's `usage.output` = Baseten's `completion_tokens`, and `usage.reasoning` = `completion_tokens_details.reasoning_tokens` (DeepSeek: 11 in a Pi turn with visible thinking).
+- **Included in `output`:** yes. With GLM at `max`, 100 of 170 completion tokens were reasoning; the visible tool calls account for ~70.
+- **Billed:** inferred, not checked against an invoice. Baseten bills output by `completion_tokens`, which includes reasoning, so fractory's cost (tokens × price) already includes it. No estimate is needed, and no `estimated` cost flag was added.
+- **The 75 s GLM turn was not hidden reasoning.** It reported 0 reasoning tokens and no reasoning deltas, for 84 output tokens. The same request answered in 0.56–2.1 s directly and in 5.2 s through Pi, and one direct call waited 5.7 s just for response headers. Most likely provider-side queueing or a cold start on Baseten's shared capacity; the probe didn't pin this down.
+- **DeepSeek `medium` vs `none`/`high`:** no measurable difference on this prompt (0 reasoning tokens and the same 187–188 completion tokens at every level). The prompt is trivial, so the model may simply not think on it. A harder prompt is needed to see whether the level matters.
+- **GLM `high` vs `low`:** no difference on this prompt either. Only `max` produced visible reasoning here.
 
 ---
 
@@ -213,7 +262,7 @@ The spec named Together; the default provider is now **Baseten**. Everything abo
 | Requested | `--model opus` | `--provider together --model <id>` |
 | Resolved id | `system/init.model` (`claude-opus-5`) + `result.modelUsage` keys (includes background Haiku) | `message_end.message.{provider,model}` (echo of request; no `responseModel` from Together) |
 | Reasoning flag | `--effort low\|medium\|high\|xhigh\|max` | `--thinking off\|minimal\|low\|medium\|high\|xhigh\|max` |
-| Effective level reported? | **No.** `init` has no effort field. We log the requested value. | **Yes**, `message_end.message.thinkingLevel`. For DeepSeek-V4.1-Flash only **`off`** and **`high`** are effective. `minimal/low/medium/max` all clamp to `high`. |
+| Effective level reported? | **No.** `init` has no effort field. We log the requested value. | **Yes**, `message_end.message.thinkingLevel`. On Together, for DeepSeek-V4.1-Flash only **`off`** and **`high`** are effective; `minimal/low/medium/max` all clamp to `high`. For the Baseten models, see §2 "Provider switch to Baseten". |
 
 Every step logs `{requestedModel, resolvedModels[], requestedReasoning, effectiveReasoning|null}`.
 

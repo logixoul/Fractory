@@ -7,7 +7,19 @@ export type PaneItem =
   | { kind: "thinking"; text: string }
   | { kind: "tool"; id: string; name: string; input: unknown; output?: string; isError?: boolean; blocked?: string }
   | { kind: "error"; text: string }
+  /** A retry inside the worker CLI (provider rate limit / 5xx), or the step retry. */
+  | { kind: "retry"; text: string }
   | { kind: "info"; text: string };
+
+/** One line for a provider_retry worker event. */
+export function providerRetryText(w: Extract<WorkerEvent, { type: "provider_retry" }>): string {
+  if (w.phase === "scheduled") {
+    const of = w.maxAttempts ? `${w.attempt}/${w.maxAttempts}` : `${w.attempt}`;
+    const wait = w.delayMs !== undefined ? ` in ${(w.delayMs / 1000).toFixed(w.delayMs < 10_000 ? 1 : 0)}s` : "";
+    return `provider retry ${of}${wait}${w.message ? `: ${w.message}` : ""}`;
+  }
+  return w.success ? `provider retry ${w.attempt} succeeded` : `provider retries gave up after ${w.attempt}${w.message ? `: ${w.message}` : ""}`;
+}
 
 export interface StepBlock {
   stepId: string;
@@ -73,7 +85,7 @@ export function buildPanes(events: readonly RunEvent[], labels: Record<string, s
         b.status = "abandoned";
         break;
       case "step_retrying":
-        b.items.push({ kind: "error", text: `transient failure, retrying in ${((e as { delayMs: number }).delayMs / 1000).toFixed(0)}s: ${(e as { reason: string }).reason}` });
+        b.items.push({ kind: "retry", text: `transient failure, retrying the step in ${((e as { delayMs: number }).delayMs / 1000).toFixed(0)}s: ${(e as { reason: string }).reason}` });
         break;
       case "checkpoint_created":
         b.items.push({ kind: "info", text: `checkpoint ${(e as { sha: string }).sha.slice(0, 10)}` });
@@ -124,6 +136,9 @@ function addWorkerEvent(b: StepBlock, w: WorkerEvent, tools: Map<string, Extract
     }
     case "error":
       b.items.push({ kind: "error", text: `${w.kind}: ${w.message}` });
+      break;
+    case "provider_retry":
+      b.items.push({ kind: w.phase === "finished" && !w.success ? "error" : "retry", text: providerRetryText(w) });
       break;
     case "done":
       if (w.resolvedModels.length) b.items.push({ kind: "info", text: `done · ${w.resolvedModels.join(", ")}${w.effectiveReasoning ? ` · reasoning ${w.effectiveReasoning}` : ""}` });

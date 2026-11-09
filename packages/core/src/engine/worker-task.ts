@@ -60,6 +60,7 @@ export async function runWorkerTask(args: {
   let done: DoneEvent | undefined;
   let error: Extract<WorkerEvent, { type: "error" }> | undefined;
   let lastResetsAt: number | undefined;
+  let requestedReasoning: string | undefined;
   let exhausted = false;
 
   const { timeoutMs, ...rest } = options;
@@ -107,8 +108,19 @@ export async function runWorkerTask(args: {
         case "error":
           error = ev;
           break;
+        case "start":
+          requestedReasoning = ev.requestedReasoning;
+          break;
         case "done":
           done = ev;
+          if (requestedReasoning && ev.effectiveReasoning && ev.effectiveReasoning !== requestedReasoning) {
+            run.append({
+              type: "warning",
+              code: "reasoning_level_mismatch",
+              stepId,
+              message: `${workerId}: requested reasoning '${requestedReasoning}', but the model ran at '${ev.effectiveReasoning}'`,
+            });
+          }
           break;
         default:
           break;

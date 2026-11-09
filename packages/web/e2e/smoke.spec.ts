@@ -29,7 +29,7 @@ test.beforeAll(async () => {
   fs.mkdirSync(repo);
   const git = (...a: string[]) => spawnSync("git", ["-c", "user.name=e2e", "-c", "user.email=e2e@localhost", "-c", "commit.gpgsign=false", ...a], { cwd: repo });
   fs.writeFileSync(path.join(repo, "math.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
-  fs.writeFileSync(path.join(repo, "fractory.config.json"), JSON.stringify({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } } }));
+  fs.writeFileSync(path.join(repo, "fractory.config.json"), JSON.stringify({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } }, judge: { swapOrderPass: false } }));
   git("init", "-q", "-b", "main");
   git("add", "-A");
   git("commit", "-q", "-m", "init");
@@ -38,8 +38,17 @@ test.beforeAll(async () => {
     summary: "Both add div; one guards against division by zero.",
     items: [
       // cites the better side (math.js:3) and the losing side's own copy of side.js
-      { aspect: "zero guard", betterSide: "A", evidence: ["math.js:3", "B: side.js:1"], recommendation: "guard b === 0", risk: "low" },
-      { aspect: "naming", betterSide: "B", evidence: ["math.js:1"], recommendation: "keep names", risk: "" },
+      {
+        aspect: "zero guard",
+        betterSide: "A",
+        evidence: [
+          { ref: "math.js:3", side: "A" },
+          { ref: "side.js:1", side: "B" },
+        ],
+        recommendation: "guard b === 0",
+        risk: "low",
+      },
+      { aspect: "naming", betterSide: "B", evidence: [{ ref: "math.js:1", side: "B" }], recommendation: "keep names", risk: "" },
     ],
   };
   const workers = (config: { workers: Record<string, unknown> }) =>

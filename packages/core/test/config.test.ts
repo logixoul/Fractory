@@ -30,12 +30,12 @@ describe("loadConfig", () => {
     });
     // default judge: a third model family, not a contestant; GLM-5.3 Flash for cost
     expect(config.roles).toEqual({ contestants: ["opus", "deepseek"], judge: "glm" });
-    expect(config.workers.glm).toMatchObject({ kind: "pi", provider: "baseten", model: "zai-org/GLM-5.3-Flash", thinking: "medium" });
+    expect(config.workers.glm).toMatchObject({ kind: "pi", provider: "baseten", model: "zai-org/GLM-5.3-Flash", thinking: "high" });
     expect(config.prices["baseten/zai-org/GLM-5.3-Flash"]).toMatchObject({ input: 0.15, output: 0.5, cacheRead: 0.03 });
     expect(config.prices["baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast"]).toMatchObject({ input: 0.6, output: 2.4, cacheRead: 0.014 });
     expect(Object.keys(config.prices).some((k) => k.startsWith("together/"))).toBe(false);
-    expect(config.judge.swapOrderPass).toBe(false);
-    expect(config.retry).toEqual({ transientMaxRetries: 2, backoffMs: [5000, 30000] });
+    expect(config.judge.swapOrderPass).toBe(true);
+    expect(config.retry).toEqual({ transientMaxRetries: 2, backoffMs: [5000, 30000], rateLimitBackoffMs: [60000, 120000] });
     expect(config.quota.warnUtilization).toBe(0.8);
     expect(config.consensus).toEqual({ maxRounds: 1, minRefs: 3 });
     expect(config.duel.maxFixIterations).toBe(2);
@@ -80,12 +80,14 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ configDir, repo })).toThrow(/two different workers/);
   });
 
-  it("warns about the Flash thinking clamp only where it was verified (Together)", () => {
+  it("warns when a requested thinking level is not one the model supports on that provider", () => {
     const together = setup(undefined, { workers: { deepseek: { provider: "together", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017", thinking: "low" } } });
-    expect(loadConfig(together).warnings.join("\n")).toMatch(/clamped to 'high'/);
-    // Baseten (the default) with medium: no clamp warning; the effective level is logged per step
-    const baseten = setup(undefined, { workers: { deepseek: { thinking: "medium" } } });
-    expect(loadConfig(baseten).warnings.join("\n")).not.toMatch(/clamped/);
+    expect(loadConfig(together).warnings.join("\n")).toMatch(/thinking='low' is not supported .* on together \(off\/high\); Pi uses high/);
+    // the defaults (DeepSeek medium, GLM high) are supported: no warning
+    expect(loadConfig(setup()).warnings.filter((w) => /thinking=/.test(w))).toEqual([]);
+    // GLM-5.3 Flash on Baseten has no medium
+    const glm = setup(undefined, { workers: { glm: { thinking: "medium" } } });
+    expect(loadConfig(glm).warnings.join("\n")).toMatch(/workers\.glm\.thinking='medium' is not supported .* \(low\/high\/max\); Pi uses .*medium → high/);
   });
 
   it("default anonymization patterns are unambiguous (no bare Pi/Together)", () => {

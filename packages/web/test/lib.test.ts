@@ -45,6 +45,25 @@ describe("panes", () => {
     expect(opus.items[3]).toMatchObject({ blocked: "permission denied" });
     expect(panes.find((p) => p.key === "judge")!.steps[0]).toMatchObject({ status: "failed", detail: "exit_check: bad" });
   });
+
+  it("shows provider retries and step retries in the live view", () => {
+    seq = 0;
+    const s = { stepId: "propose.c3d4", attempt: 1 };
+    const events = [
+      ev({ type: "step_started", ...s, workerId: "deepseek", label: "c3d4" }),
+      ev({ type: "worker_event", ...s, event: { type: "provider_retry", phase: "scheduled", attempt: 1, maxAttempts: 4, delayMs: 2000, message: "429 Too Many Requests" } }),
+      ev({ type: "worker_event", ...s, event: { type: "provider_retry", phase: "finished", attempt: 1, success: true } }),
+      ev({ type: "worker_event", ...s, event: { type: "provider_retry", phase: "finished", attempt: 4, success: false, message: "503" } }),
+      ev({ type: "step_retrying", ...s, reason: "deepseek: transient: 429", delayMs: 60000 }),
+    ];
+    const items = buildPanes(events, labels).find((p) => p.key === "deepseek")!.steps[0]!.items;
+    expect(items).toEqual([
+      { kind: "retry", text: "provider retry 1/4 in 2.0s: 429 Too Many Requests" },
+      { kind: "retry", text: "provider retry 1 succeeded" },
+      { kind: "error", text: "provider retries gave up after 4: 503" },
+      { kind: "retry", text: "transient failure, retrying the step in 60s: deepseek: transient: 429" },
+    ]);
+  });
 });
 
 describe("phase indicator", () => {

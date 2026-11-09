@@ -24,7 +24,7 @@ function repo(): string {
   git("add", "-A");
   git("commit", "-q", "-m", "init");
   // per-repo config: fake workers (tests never call a model)
-  fs.writeFileSync(path.join(r, "fractory.config.json"), JSON.stringify({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" } } }));
+  fs.writeFileSync(path.join(r, "fractory.config.json"), JSON.stringify({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" } }, judge: { swapOrderPass: false } }));
   return r;
 }
 
@@ -95,7 +95,7 @@ describe("fractory CLI", () => {
     const r = repo();
     const prompt = path.join(tmp(), "p.md");
     fs.writeFileSync(prompt, "Add div.\n");
-    const duelVerdict = { summary: "s", items: [{ aspect: "a", betterSide: "A", evidence: ["math.js:1"], recommendation: "keep", risk: "" }] };
+    const duelVerdict = { summary: "s", items: [{ aspect: "a", betterSide: "A", evidence: [{ ref: "math.js:1", side: "base" }], recommendation: "keep", risk: "" }] };
     const workers = (config: Config) =>
       Object.fromEntries(
         Object.keys(config.workers).map((id) => [

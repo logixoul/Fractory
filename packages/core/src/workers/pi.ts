@@ -23,8 +23,27 @@ export const PI_TOOLS = {
   edit: ["read", "edit", "write", "grep", "find", "ls"],
 } as const;
 
-/** Pi's internal retries are disabled so every retry is the orchestrator's decision (§2). */
-export const PI_AGENT_SETTINGS = { retry: { enabled: false, provider: { maxRetries: 0 } } };
+/**
+ * Pi's own retries for provider rate limits (Baseten Basic tier: 15-120 RPM) and 5xx (§2).
+ * Two levels, both bounded:
+ *  - provider (request) level: retries a failed HTTP request with 429/408/409/5xx, honoring
+ *    Retry-After / retry-after-ms up to maxRetryDelayMs, otherwise exponential 0.5-8 s.
+ *    Not visible in the JSON stream.
+ *  - agent level: re-sends the turn after a retryable error (incl. a dropped stream, or a
+ *    server-requested delay above maxRetryDelayMs), exponential 2, 4, 8, 16 s. Emits
+ *    auto_retry_start/end, which become provider_retry WorkerEvents.
+ * Quota/billing errors are not retried by the agent level. The orchestrator's step retry stays
+ * the last resort.
+ */
+export const PI_AGENT_SETTINGS = {
+  retry: {
+    enabled: true,
+    maxRetries: 4,
+    baseDelayMs: 2_000,
+    maxAgentDelayMs: 60_000,
+    provider: { maxRetries: 4, maxRetryDelayMs: 60_000 },
+  },
+};
 
 export function ensurePiAgentDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true });
@@ -145,6 +164,7 @@ export class PiWorker implements Worker {
 type Obj = Record<string, unknown>;
 const obj = (v: unknown): Obj => (v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : {});
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+const int = (v: unknown): number => Math.max(0, Math.trunc(num(v)));
 
 export const GUARD_BLOCK_PREFIX = "fractory path guard:";
 
@@ -218,6 +238,27 @@ export class PiStreamParser implements StreamParser {
           },
         ];
       }
+      case "auto_retry_start":
+        return [
+          {
+            type: "provider_retry",
+            phase: "scheduled",
+            attempt: int(o.attempt),
+            ...(typeof o.maxAttempts === "number" ? { maxAttempts: int(o.maxAttempts) } : {}),
+            ...(typeof o.delayMs === "number" && o.delayMs >= 0 ? { delayMs: o.delayMs } : {}),
+            ...(typeof o.errorMessage === "string" ? { message: truncate(o.errorMessage, 1000) } : {}),
+          },
+        ];
+      case "auto_retry_end":
+        return [
+          {
+            type: "provider_retry",
+            phase: "finished",
+            attempt: int(o.attempt),
+            success: o.success === true,
+            ...(typeof o.finalError === "string" ? { message: truncate(o.finalError, 1000) } : {}),
+          },
+        ];
       case "agent_settled":
         return this.#settle(o.aborted === true);
       default:

@@ -3,6 +3,29 @@ import { parseEnvFile } from "../src/util/envfile.js";
 import { LineSplitter, parseJsonLine } from "../src/util/jsonl.js";
 import { RUN_ID_RE, newLabels, newRunId, seededShuffle } from "../src/util/random.js";
 import { REDACTED, Redactor } from "../src/util/redact.js";
+import { MAX_HONORED_RETRY_AFTER_MS, retryAfterMsFromText } from "../src/util/retry-after.js";
+import { stepRetryDelayMs } from "../src/engine/drive.js";
+
+describe("Retry-After in error text", () => {
+  it("parses Pi's capped-delay error, headers and prose; seconds by default", () => {
+    expect(retryAfterMsFromText("Server requested 120s retry delay (max: 60s). 429 Too Many Requests")).toBe(120_000);
+    expect(retryAfterMsFromText('429 {"retry-after-ms":"1500"}')).toBe(1500);
+    expect(retryAfterMsFromText("Retry-After: 30")).toBe(30_000);
+    expect(retryAfterMsFromText("rate limited, please try again in 2 minutes")).toBe(120_000);
+    expect(retryAfterMsFromText("retry in 250ms")).toBe(250);
+    expect(retryAfterMsFromText("Retry-After: 99999")).toBe(MAX_HONORED_RETRY_AFTER_MS);
+    expect(retryAfterMsFromText("503 Service Unavailable")).toBeUndefined();
+  });
+
+  it("step retry delay: Retry-After, else the rate-limit list for 429, else the generic list", () => {
+    const retry = { backoffMs: [5_000, 30_000], rateLimitBackoffMs: [60_000, 120_000] };
+    expect(stepRetryDelayMs("deepseek: transient: 503 overloaded", 0, retry)).toBe(5_000);
+    expect(stepRetryDelayMs("deepseek: transient: 503 overloaded", 5, retry)).toBe(30_000);
+    expect(stepRetryDelayMs("glm: transient: 429 Too Many Requests", 0, retry)).toBe(60_000);
+    expect(stepRetryDelayMs("glm: transient: rate limit exceeded", 1, retry)).toBe(120_000);
+    expect(stepRetryDelayMs("glm: transient: 429; Retry-After: 7", 0, retry)).toBe(7_000);
+  });
+});
 
 describe("LineSplitter", () => {
   it("handles CRLF and lines split across chunks", () => {

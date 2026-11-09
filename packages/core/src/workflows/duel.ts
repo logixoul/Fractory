@@ -9,7 +9,7 @@ import { checkpoint, commitStepResult, restoreCheckpoint } from "../git/checkpoi
 import { changedFiles, revParse, squashedDiff } from "../git/git.js";
 import { ensureWorktree, worktreeBranch } from "../git/worktree.js";
 import { dataPaths } from "../paths.js";
-import { DuelVerdict } from "../schemas/outputs.js";
+import { DuelVerdict, type DuelEvidence } from "../schemas/outputs.js";
 import type { RunState } from "../state/reducer.js";
 import { leakCheck, relativizePaths } from "../text/anonymize.js";
 import { loadProjectContext } from "../text/context.js";
@@ -78,6 +78,8 @@ export interface DuelJudgeResult {
   sides: Record<"A" | "B", { label: string; workerId: string }>;
   items: JudgeItem[];
   invalidEvidence: string[];
+  /** Evidence refs that still named a side they do not exist in after the repair turn (not linked). Absent in older runs. */
+  evidenceSideMismatches?: string[];
   /** Items the swapped-order pass disagreed with (judge.swapOrderPass). */
   droppedBySwapPass: JudgeItem[];
   /** No point survived the swapped-order pass: the verdict is empty (nothing to approve). */
@@ -469,10 +471,12 @@ function judgeStep(env: DuelEnv, st: RunState, setup: DuelSetup, maxFix: number)
         fileList(files),
         "",
         "Your working directory holds the base commit (read-only), for context. The order of A and B is random and carries no meaning.",
-        "Compare the implementations aspect by aspect (correctness, completeness, tests, design, risk). For each aspect give the better side, path:line evidence (repo-relative, as the file is in that side's version or in the base), a concrete recommendation for the final implementation, and the risk of adopting it.",
+        "Compare the implementations aspect by aspect (correctness, completeness, tests, design, risk). For each aspect give the better side, path:line evidence, a concrete recommendation for the final implementation, and the risk of adopting it.",
+        "Each evidence entry is one repo-relative path:line ref plus the side whose version it points into: A, B, or base (the base commit). The ref must exist, with that line, in that version; this is checked.",
       ].join("\n");
       const taskOpts = { cwd, mode: "read-only" as const, stepDir: ctx.stepDir, inputsDir: path.join(ctx.stepDir, "inputs"), timeoutMs: cfg.timeouts.judgeMs };
-      const evidenceRoots = [setup.worktrees[la]!, setup.worktrees[lb]!];
+      // A's and B's worktrees are still at their judged heads; the judge's own worktree is the base.
+      const sideRoots = { A: setup.worktrees[la]!, B: setup.worktrees[lb]!, base: cwd };
 
       return withGates(
         ctx,
@@ -485,29 +489,30 @@ function judgeStep(env: DuelEnv, st: RunState, setup: DuelSetup, maxFix: number)
         },
         async () => {
           let r = await runStructured(ctx, { workerId: judgeId, schema: DuelVerdict, name: "verdict", task: { ...taskOpts, prompt } });
-          let bad = duelEvidence(r.value, cwd, evidenceRoots);
-          if (bad.unsupported.length > 0) {
+          let bad = checkDuelEvidence(r.value, sideRoots);
+          if (bad.unsupported.length > 0 || bad.mismatched.length > 0) {
+            // One repair turn covers both problems.
             r = await runStructured(ctx, {
               workerId: judgeId,
               schema: DuelVerdict,
               name: "verdict",
-              task: {
-                ...taskOpts,
-                sessionId: r.done.sessionId,
-                prompt: `These items have no evidence reference that exists in either implementation or the base (file must exist, line within the file): ${bad.unsupported.join("; ")}. Return the complete verdict again with valid path:line evidence for every item.`,
-              },
+              task: { ...taskOpts, sessionId: r.done.sessionId, prompt: evidenceRepairPrompt(bad) },
             });
-            bad = duelEvidence(r.value, cwd, evidenceRoots);
+            bad = checkDuelEvidence(r.value, sideRoots);
           }
           if (bad.unsupported.length > 0) throw new StepFailure("exit_check", `judge items without valid evidence: ${bad.unsupported.join("; ")}`);
-          const headsAB = { A: chains[la]!.head!.head, B: chains[lb]!.head!.head };
+          if (bad.mismatched.length > 0) {
+            // The items still have valid evidence; the mislabelled refs are not linked (shown as unresolved).
+            ctx.record({ type: "warning", code: "evidence_side_mismatch", stepId: ctx.stepId, message: `after the repair turn, ${bad.mismatched.length} evidence ref(s) still name a side they do not exist in: ${bad.mismatched.join("; ")}` });
+          }
           const resolveOpts = {
-            roots: { A: setup.worktrees[la]!, B: setup.worktrees[lb]!, base: cwd },
+            roots: sideRoots,
             labels: { A: la, B: lb },
-            shas: { ...headsAB, base: setup.base },
+            shas: { A: chains[la]!.head!.head, B: chains[lb]!.head!.head, base: setup.base },
           };
           let items: JudgeItem[] = r.value.items.map((it) => ({
             ...it,
+            evidence: it.evidence.map(evidenceText),
             betterLabel: sides[it.betterSide].label,
             betterWorker: sides[it.betterSide].workerId,
             evidenceRefs: resolveEvidence(it, resolveOpts),
@@ -537,37 +542,107 @@ function judgeStep(env: DuelEnv, st: RunState, setup: DuelSetup, maxFix: number)
           const verdictFile = writeOut(
             ctx,
             "verdict.json",
-            JSON.stringify({ verdict: r.value, sides, heads, items, invalidEvidence: bad.invalid, droppedBySwapPass: dropped, noRobustPreferences }, null, 2) + "\n",
+            JSON.stringify({ verdict: r.value, sides, heads, items, invalidEvidence: bad.invalid, evidenceSideMismatches: bad.mismatched, droppedBySwapPass: dropped, noRobustPreferences }, null, 2) + "\n",
           );
-          return { verdictFile, summary: r.value.summary, sides, items, invalidEvidence: bad.invalid, droppedBySwapPass: dropped, noRobustPreferences, heads } satisfies DuelJudgeResult;
+          return {
+            verdictFile,
+            summary: r.value.summary,
+            sides,
+            items,
+            invalidEvidence: bad.invalid,
+            evidenceSideMismatches: bad.mismatched,
+            droppedBySwapPass: dropped,
+            noRobustPreferences,
+            heads,
+          } satisfies DuelJudgeResult;
         },
       );
     },
   };
 }
 
+type Where = "A" | "B" | "base";
+const WHERE: readonly Where[] = ["A", "B", "base"];
+
+/**
+ * One verdict evidence entry. Current verdicts declare the side; a plain string is an entry from
+ * a run judged before that (its side is inferred with sideMentioned, as a fallback).
+ */
+export type EvidenceEntry = string | DuelEvidence;
+const evidenceText = (e: EvidenceEntry): string => (typeof e === "string" ? e : e.ref);
+
+/** Where a single ref resolves: A's head, B's head, the base. */
+function whereResolves(raw: string, roots: Record<Where, string>): Where[] {
+  return WHERE.filter((side) => checkRefs(raw, roots[side]).valid.length > 0);
+}
+
+/**
+ * Checks the judge's evidence against the code it saw.
+ *  - unsupported: items with no ref that resolves in its declared side (the step fails after the repair turn)
+ *  - mismatched: refs that exist, but not in the side the entry declares
+ *  - invalid: refs that resolve nowhere (tolerated if the item has other valid evidence)
+ */
+export function checkDuelEvidence(v: { items: readonly { aspect: string; evidence: readonly EvidenceEntry[] }[] }, roots: Record<Where, string>) {
+  const unsupported: string[] = [];
+  const mismatched: string[] = [];
+  const invalid: string[] = [];
+  for (const it of v.items) {
+    let supported = false;
+    for (const e of it.evidence) {
+      for (const r of extractRefs(evidenceText(e))) {
+        const hits = whereResolves(r.raw, roots);
+        const declared = typeof e === "string" ? undefined : e.side;
+        if (hits.length === 0) invalid.push(r.raw);
+        else if (declared === undefined || hits.includes(declared)) supported = true;
+        else mismatched.push(`${it.aspect}: ${r.raw} is declared ${declared} but exists only in ${hits.join(", ")}`);
+      }
+    }
+    if (!supported) unsupported.push(it.aspect);
+  }
+  return { unsupported, mismatched, invalid };
+}
+
+function evidenceRepairPrompt(bad: ReturnType<typeof checkDuelEvidence>): string {
+  return [
+    ...(bad.unsupported.length > 0
+      ? [`These items have no evidence reference that exists in the side it names (file must exist in that version, line within the file): ${bad.unsupported.join("; ")}.`]
+      : []),
+    ...(bad.mismatched.length > 0
+      ? [`These evidence entries name the wrong side: ${bad.mismatched.join("; ")}. Set each entry's side to the version its ref points into (A, B or base), or cite a ref that exists in the side you mean.`]
+      : []),
+    "Return the complete verdict again with valid path:line evidence and the correct side for every entry.",
+  ].join("\n");
+}
+
 /**
  * Resolves every evidence ref of an item against the code the judge saw: side A's head, side
  * B's head (their worktrees, still at those heads while judging) and the base (judge worktree).
- * When a ref resolves in more than one place: the side the evidence text names, then the side
- * the item text names, then the item's better side, then base; and it is marked ambiguous.
+ * A declared side is used only where the ref really resolves there (a mismatch is not linked).
+ * Fallback for entries without a declared side (runs judged before the field existed): when a
+ * ref resolves in more than one place, the side the evidence text names, then the side the item
+ * text names, then the item's better side, then base. Either way, `ambiguous` records that it
+ * also resolved elsewhere.
  */
 export function resolveEvidence(
-  item: { evidence: string[]; aspect: string; recommendation: string; risk: string; betterSide: "A" | "B" },
-  o: { roots: Record<"A" | "B" | "base", string>; labels: Record<"A" | "B", string>; shas: Record<"A" | "B" | "base", string> },
+  item: { evidence: readonly EvidenceEntry[]; aspect: string; recommendation: string; risk: string; betterSide: "A" | "B" },
+  o: { roots: Record<Where, string>; labels: Record<"A" | "B", string>; shas: Record<Where, string> },
 ): ResolvedRef[] {
   const out: ResolvedRef[] = [];
   const itemSide = sideMentioned([item.aspect, item.recommendation, item.risk].join("\n"));
-  const order: ("A" | "B" | "base")[] = ["A", "B", "base"];
   for (const ev of item.evidence) {
-    const evSide = sideMentioned(ev);
-    for (const r of extractRefs(ev)) {
-      const hits = order.filter((side) => checkRefs(r.raw, o.roots[side]).valid.length > 0);
+    const text = evidenceText(ev);
+    const declared = typeof ev === "string" ? undefined : ev.side;
+    const evSide = declared === undefined ? sideMentioned(text) : undefined;
+    for (const r of extractRefs(text)) {
+      const hits = whereResolves(r.raw, o.roots);
       if (hits.length === 0) continue; // unresolvable: listed in invalidEvidence
-      const pick = (side: "A" | "B" | "base" | undefined): boolean => side !== undefined && hits.includes(side);
-      let side: "A" | "B" | "base";
+      const pick = (side: Where | undefined): boolean => side !== undefined && hits.includes(side);
+      let side: Where;
       let chosenBy: ResolvedRef["chosenBy"];
-      if (hits.length === 1) [side, chosenBy] = [hits[0]!, "only"];
+      if (declared !== undefined) {
+        if (!pick(declared)) continue; // side mismatch: listed in evidenceSideMismatches
+        [side, chosenBy] = [declared, "declared"];
+      } else if (hits.length === 1) [side, chosenBy] = [hits[0]!, "only"];
       else if (pick(evSide)) [side, chosenBy] = [evSide!, "evidence"];
       else if (pick(itemSide)) [side, chosenBy] = [itemSide!, "item"];
       else if (pick(item.betterSide)) [side, chosenBy] = [item.betterSide, "better"];
@@ -588,20 +663,6 @@ export function resolveEvidence(
     }
   }
   return out;
-}
-
-/** An item's evidence is valid if it resolves in either side's final worktree (or the base). */
-function duelEvidence(v: DuelVerdict, baseRoot: string, sideRoots: string[]) {
-  const invalid: string[] = [];
-  const unsupported: string[] = [];
-  for (const it of v.items) {
-    const text = it.evidence.join("\n");
-    const ok = [baseRoot, ...sideRoots].some((root) => checkRefs(text, root).valid.length > 0);
-    if (!ok) unsupported.push(it.aspect);
-    const all = checkRefs(text, baseRoot).invalid.map((r) => r.raw);
-    invalid.push(...all.filter((raw) => !sideRoots.some((root) => checkRefs(raw, root).valid.length > 0)));
-  }
-  return { invalid, unsupported };
 }
 
 /** Diff sections of `diff` for the given repo-relative files (all of it if none match). */

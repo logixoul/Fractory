@@ -37,6 +37,8 @@
           </details>
         {:else if it.kind === "error"}
           <div class="error">{it.text}</div>
+        {:else if it.kind === "retry"}
+          <div class="retry small">↻ {it.text}</div>
         {:else}
           <div class="muted small">{it.text}</div>
         {/if}
@@ -57,4 +59,5 @@
   .tool summary { cursor: pointer; }
   .tool.blocked summary code { color: var(--bad); }
   .small { font-size: 12px; }
+  .retry { color: var(--warn); margin: 2px 0; }
 </style>

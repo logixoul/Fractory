@@ -25,6 +25,8 @@ export interface FakeScript {
   structured?: unknown;
   /** End without a done event (protocol violation). */
   noDone?: boolean;
+  /** Reasoning levels as a real adapter reports them (start.requestedReasoning, done.effectiveReasoning). */
+  reasoning?: { requested?: string; effective?: string };
 }
 
 type Resolver = (task: WorkerTask, callIndex: number) => FakeScript | undefined;
@@ -78,7 +80,7 @@ export class FakeWorker implements Worker {
     }
     const deadline = Date.now() + task.timeoutMs;
     const sessionId = script.sessionId ?? task.sessionId ?? `fake-${this.id}-${n}`;
-    yield { type: "start", sessionId, resolvedModel: `fake/${this.id}` };
+    yield { type: "start", sessionId, resolvedModel: `fake/${this.id}`, ...(script.reasoning?.requested ? { requestedReasoning: script.reasoning.requested } : {}) };
 
     for (const a of script.actions ?? []) {
       if (task.signal.aborted) {
@@ -114,6 +116,7 @@ export class FakeWorker implements Worker {
       sessionId,
       finalText: script.finalText ?? "",
       resolvedModels: [`fake/${this.id}`],
+      ...(script.reasoning?.effective ? { effectiveReasoning: script.reasoning.effective } : {}),
     };
     if (script.structured !== undefined) done.structured = script.structured;
     yield done;

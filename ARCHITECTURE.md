@@ -31,7 +31,7 @@ Worktrees live outside your repo, in `<dataDir>/worktrees/<runId>/<label>`, on b
 `core/src/engine/drive.ts` drives a `WorkflowDef`: a pure function `next(state)` that returns either the next **stage** (steps that run in parallel, or one approval gate) or **done**. Control flow therefore depends only on recorded state, never on model text, except through schema-validated step results.
 
 - **Steps.** A step runs, its result is JSON-normalized, and its `exitCheck` (machine-checkable) decides between `step_completed` and `step_failed`.
-- **Failures.** A hard failure aborts its siblings. A quota hit lets siblings finish (their work is kept) and pauses the run. Transient errors (5xx, network, a provider 429 for Pi) are retried inside the step with backoff, from the step's checkpoint.
+- **Failures.** A hard failure aborts its siblings. A quota hit lets siblings finish (their work is kept) and pauses the run. Pi retries provider rate limits and 5xx itself first (logged as `provider_retry`). After that, transient errors (5xx, network, a provider 429 for Pi) are retried as a whole step, from the step's checkpoint: a Retry-After in the error is honoured, rate limits back off from 60 s, and other errors from 5 s.
 - **Resume.** A crashed step (started, never finished) is marked abandoned and rerun. Completed steps are never rerun. `--retry-failed` reopens a failed run at its failed step.
 - **Pauses.** `paused_quota` (with the reset time; resume is refused earlier unless forced), `awaiting_approval`, and `needs_attention` (the main repo changed during a step; the step's result stands).
 - **Worker calls.** `worker-task.ts` streams a worker's normalized events into the log (text deltas merged), records usage, and computes cost from the price table. Claude is subscription-billed, so its vendor cost is shown as API-equivalent only. It also records quota observations and maps worker errors to engine errors.
@@ -50,7 +50,7 @@ Worktrees live outside your repo, in `<dataDir>/worktrees/<runId>/<label>`, on b
   - read-only tools, or file tools in edit mode; never a shell;
   - must report `apiKeySource: "none"`.
 - **PiWorker** (`pi --mode json`):
-  - prompt on stdin; isolated agent dir with internal retries off; no context files, skills or extensions;
+  - prompt on stdin; isolated agent dir (Pi's own retries for rate limits and 5xx are on and bounded); no context files, skills or extensions;
   - always loads the **path guard** (`core/assets/pi-path-guard.ts`), a fail-closed allowlist: its own worktree, its own `inputs/` and out file. The adapter refuses a result unless the guard acknowledged loading with a per-call nonce.
 - **FakeWorker**: scripted and deterministic. Every automated test uses it.
 
@@ -82,8 +82,8 @@ Processes are spawned with argv arrays (`cross-spawn`), and whole process trees 
 - Every edit step is checkpointed (a commit at its start); retries restore that checkpoint.
 - An implementation without changes forfeits. With one forfeit there's no judge, and the other branch is the result; if both forfeit, the run fails.
 - The judge sees squashed `base..HEAD` diffs verbatim, check results, and your task.
-- Each evidence ref is resolved to the side and commit where it exists (A's head, B's head or base; ambiguity is recorded), and links, the file view and `report.md` use exactly that.
-- Optional `judge.swapOrderPass` re-rates every point with A/B swapped and keeps only agreeing points. If none survive, it records `no_robust_preferences` and continues.
+- Each evidence entry declares its side (`A`, `B` or `base`). The orchestrator checks that the ref exists there, at A's head, B's head or the base; a mismatch gets one repair turn. Links, the file view and `report.md` use exactly that side and commit.
+- `judge.swapOrderPass` (on by default) re-rates every point with A/B swapped and keeps only agreeing points. If none survive, it records `no_robust_preferences` and continues.
 
 ## Daemon and GUI
 

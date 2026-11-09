@@ -22,7 +22,8 @@ afterEach(() => {
 });
 
 export function testConfig(overrides: unknown = {}): Config {
-  return parseConfig(deepMerge(DEFAULT_CONFIG_INPUT, overrides)).config;
+  // The swapped-order judge pass (default on) has its own tests; fake judges elsewhere answer one pass.
+  return parseConfig(deepMerge(deepMerge(DEFAULT_CONFIG_INPUT, { judge: { swapOrderPass: false } }), overrides)).config;
 }
 
 export function newTestRun(store: RunStore): RunHandle {

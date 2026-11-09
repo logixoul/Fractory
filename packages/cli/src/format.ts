@@ -23,8 +23,17 @@ export function formatEvent(e: RunEvent, st: RunState): string | null {
       if (ev.type === "start") return `${t}   ${e.stepId}: ${ev.requestedModel ?? "?"}${ev.resolvedModel ? ` → ${ev.resolvedModel}` : ""}${ev.requestedReasoning ? ` (reasoning ${ev.requestedReasoning})` : ""}`;
       if (ev.type === "tool_blocked") return `${t}   ${e.stepId}: blocked ${ev.name}: ${firstLine(ev.reason)}`;
       if (ev.type === "error") return `${t}   ${e.stepId}: ${ev.kind} error: ${firstLine(ev.message)}`;
+      if (ev.type === "provider_retry") {
+        if (ev.phase === "scheduled") {
+          const wait = ev.delayMs !== undefined ? ` in ${(ev.delayMs / 1000).toFixed(1)}s` : "";
+          return `${t}   ${e.stepId}: ↻ provider retry ${ev.attempt}${ev.maxAttempts ? `/${ev.maxAttempts}` : ""}${wait}${ev.message ? `: ${firstLine(ev.message)}` : ""}`;
+        }
+        return `${t}   ${e.stepId}: ${ev.success ? `provider retry ${ev.attempt} succeeded` : `provider retries gave up after ${ev.attempt}${ev.message ? `: ${firstLine(ev.message)}` : ""}`}`;
+      }
       return null;
     }
+    case "step_retrying":
+      return `${t} ↻ ${e.stepId}: transient failure, retrying the step in ${(e.delayMs / 1000).toFixed(0)}s: ${firstLine(e.reason)}`;
     case "quota_warning":
       return `${t} ⚠ quota: ${e.workerId} ${e.window} at ${Math.round(e.utilization * 100)}% (${e.source})`;
     case "checkpoint_created":

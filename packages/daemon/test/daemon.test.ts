@@ -24,7 +24,7 @@ function repo(): string {
   fs.writeFileSync(path.join(r, "math.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n");
   git("add", "-A");
   git("commit", "-q", "-m", "init");
-  fs.writeFileSync(path.join(r, "fractory.config.json"), JSON.stringify({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" } } }));
+  fs.writeFileSync(path.join(r, "fractory.config.json"), JSON.stringify({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" } }, judge: { swapOrderPass: false } }));
   return r;
 }
 
@@ -39,7 +39,7 @@ function fakeWorkers(b: Behaviour = {}) {
           if (out.endsWith("decision.json"))
             return { structured: { summary: "s", decisions: [{ topic: "t", decision: "d", rationale: "r", basedOn: "A", evidence: ["math.js:1"] }], unresolved: [] } };
           if (out.endsWith("verdict.json"))
-            return { structured: { summary: "s", items: [{ aspect: "a", betterSide: "B", evidence: ["math.js:1"], recommendation: "r", risk: "" }] } };
+            return { structured: { summary: "s", items: [{ aspect: "a", betterSide: "B", evidence: [{ ref: "math.js:1", side: "B" }], recommendation: "r", risk: "" }] } };
           if (out.endsWith("revise.json")) return { structured: { noChanges: true, proposal: "", changeSummary: "" } };
           if (b.quota && id === "opus") return { actions: fakeQuotaExhausted(Date.now() + 3600_000) };
           if (/independently implementing|approved these items/.test(t.prompt))

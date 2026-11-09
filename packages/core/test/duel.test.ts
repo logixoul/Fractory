@@ -8,7 +8,7 @@ import { Redactor } from "../src/util/redact.js";
 import { FakeWorker, fakeQuotaExhausted, type FakeScript } from "../src/workers/fake.js";
 import type { WorkerTask } from "../src/workers/types.js";
 import type { DuelSetup, JudgeItem } from "../src/workflows/duel.js";
-import { diffExcerpt } from "../src/workflows/duel.js";
+import { checkDuelEvidence, diffExcerpt, resolveEvidence } from "../src/workflows/duel.js";
 import { labelOf, testConfig, tmpDir } from "./helpers.js";
 import { dataDir, g, initRepo } from "./git-helpers.js";
 
@@ -52,8 +52,8 @@ const judgeWorker = (swap?: { index: number; side: string }[]) =>
 const verdict = {
   summary: "Both work; take the guard from one side.",
   items: [
-    { aspect: "division guard", betterSide: "A", evidence: ["math.js:4"], recommendation: "guard against b === 0", risk: "low" },
-    { aspect: "naming", betterSide: "B", evidence: ["math.js:1"], recommendation: "keep names", risk: "" },
+    { aspect: "division guard", betterSide: "A", evidence: [{ ref: "math.js:2", side: "base" }], recommendation: "guard against b === 0", risk: "low" },
+    { aspect: "naming", betterSide: "B", evidence: [{ ref: "math.js:1", side: "B" }], recommendation: "keep names", risk: "" },
   ],
 };
 
@@ -244,15 +244,30 @@ describe("duel workflow", () => {
       finalText: "done",
     });
     // The judge learns which contestant is A from its diff input (the A/B order is seeded).
+    // Pass 1 mislabels one ref (B's file declared A) and one that exists nowhere but base (declared B):
+    // that triggers one repair turn, which fixes the first and leaves the second.
     const glm = new FakeWorker("glm", (t) => {
       const diffA = fs.readFileSync(path.join(t.inputsDir!, "diff-A.patch"), "utf8");
       const [aFile, bFile] = diffA.includes("opus.js") ? ["opus.js", "deepseek.js"] : ["deepseek.js", "opus.js"];
+      const repair = /name the wrong side/.test(t.prompt);
       return {
         structured: {
           summary: "s",
           items: [
-            { aspect: "structure", betterSide: "A", evidence: [`${aFile}:1`, `${bFile}:1`, "B: math.js:1", "math.js:2", "old.js:1"], recommendation: "keep it", risk: "" },
-            { aspect: "guard", betterSide: "A", evidence: ["math.js:1"], recommendation: "copy the guard from side B", risk: "" },
+            {
+              aspect: "structure",
+              betterSide: "A",
+              evidence: [
+                { ref: `${aFile}:1`, side: "A" },
+                { ref: `${bFile}:1`, side: repair ? "B" : "A" },
+                { ref: "math.js:1", side: "B" },
+                { ref: "math.js:2", side: "base" },
+                { ref: "old.js:1", side: "B" },
+              ],
+              recommendation: "keep it",
+              risk: "",
+            },
+            { aspect: "guard", betterSide: "A", evidence: [{ ref: "math.js:1", side: "A" }], recommendation: "copy the guard from side B", risk: "" },
           ],
         },
       };
@@ -267,31 +282,56 @@ describe("duel workflow", () => {
     const byRaw = Object.fromEntries(one.evidenceRefs.map((r) => [r.raw, r]));
     const aFile = `${j.sides.A.workerId}.js:1`;
     const bFile = `${j.sides.B.workerId}.js:1`;
+    // exactly one repair turn (for the side mismatches)
+    expect(glm.calls.filter((c) => /name the wrong side/.test(c.prompt))).toHaveLength(1);
     // the better side's own file
-    expect(byRaw[aFile]).toMatchObject({ side: "A", label: la, sha: j.heads[la], ambiguous: false, chosenBy: "only" });
-    // the other (losing) side's file: its own side and commit, not the item's better side
-    expect(byRaw[bFile]).toMatchObject({ side: "B", label: lb, sha: j.heads[lb], ambiguous: false, chosenBy: "only" });
-    // resolves everywhere: the evidence text names B
-    expect(byRaw["math.js:1"]).toMatchObject({ side: "B", sha: j.heads[lb], ambiguous: true, chosenBy: "evidence", resolvedIn: ["A", "B", "base"] });
-    // resolves everywhere, nothing named: the item's better side
-    expect(byRaw["math.js:2"]).toMatchObject({ side: "A", sha: j.heads[la], ambiguous: true, chosenBy: "better" });
-    // only at base (deleted by both)
-    expect(byRaw["old.js:1"]).toMatchObject({ side: "base", sha: setupRes.base, ambiguous: false, chosenBy: "only" });
-    expect(byRaw["old.js:1"]!.label).toBeUndefined();
-    // item text names side B
-    expect(two.evidenceRefs[0]).toMatchObject({ side: "B", label: lb, ambiguous: true, chosenBy: "item" });
+    expect(byRaw[aFile]).toMatchObject({ side: "A", label: la, sha: j.heads[la], ambiguous: false, chosenBy: "declared" });
+    // the other (losing) side's file, corrected in the repair turn: its own side and commit
+    expect(byRaw[bFile]).toMatchObject({ side: "B", label: lb, sha: j.heads[lb], ambiguous: false, chosenBy: "declared" });
+    // resolves everywhere: the declared side wins (no text inference), still marked ambiguous
+    expect(byRaw["math.js:1"]).toMatchObject({ side: "B", sha: j.heads[lb], ambiguous: true, chosenBy: "declared", resolvedIn: ["A", "B", "base"] });
+    expect(byRaw["math.js:2"]).toMatchObject({ side: "base", sha: setupRes.base, ambiguous: true, chosenBy: "declared" });
+    expect(byRaw["math.js:2"]!.label).toBeUndefined();
+    // old.js exists only at base but is declared B: not linked, recorded, and a warning
+    expect(byRaw["old.js:1"]).toBeUndefined();
+    expect((st.steps.judge!.result as { evidenceSideMismatches: string[] }).evidenceSideMismatches).toEqual(["structure: old.js:1 is declared B but exists only in base"]);
+    expect(st.warnings.map((w) => w.code)).toContain("evidence_side_mismatch");
+    // the item text naming side B no longer matters: the declared side is used
+    expect(two.evidenceRefs[0]).toMatchObject({ side: "A", label: la, ambiguous: true, chosenBy: "declared" });
 
     // report.md links each ref to its own side and commit
     approveRun(store().open(run.runId), []);
     const done = await driveRun(store().open(run.runId), { dataDir: data, workers: { opus: worker("opus", {}), deepseek: worker("deepseek", {}), glm } });
     const report = fs.readFileSync((done.result as { reportMd: string }).reportMd, "utf8");
     expect(report).toContain(`[${bFile}](#ref/${lb}/${j.heads[lb]}/1-1/${j.sides.B.workerId}.js) (B, ${j.sides.B.workerId} @ ${j.heads[lb]!.slice(0, 7)})`);
-    expect(report).toContain(`[old.js:1](#ref/base/${setupRes.base}/1-1/old.js) (base @ ${setupRes.base.slice(0, 7)})`);
-    expect(report).toContain("ambiguous");
+    expect(report).toContain(`[math.js:2](#ref/base/${setupRes.base}/2-2/math.js) (base @ ${setupRes.base.slice(0, 7)}, ambiguous)`);
+    expect(report).toContain("`old.js:1` (unresolved)");
 
     function store() {
       return new RunStore(data, new Redactor());
     }
+  });
+
+  it("resolveEvidence: entries without a declared side (runs judged before the field) fall back to text inference", () => {
+    const mk = (files: Record<string, string>) => {
+      const d = tmpDir();
+      for (const [f, c] of Object.entries(files)) fs.writeFileSync(path.join(d, f), c);
+      return d;
+    };
+    const roots = { A: mk({ "a.js": "x\n", "m.js": "1\n2\n" }), B: mk({ "b.js": "y\n", "m.js": "1\n2\n" }), base: mk({ "m.js": "1\n2\n", "old.js": "z\n" }) };
+    const o = { roots, labels: { A: "la", B: "lb" }, shas: { A: "a".repeat(40), B: "b".repeat(40), base: "0".repeat(40) } };
+    const refs = resolveEvidence({ aspect: "x", recommendation: "r", risk: "", betterSide: "A", evidence: ["b.js:1", "B: m.js:1", "m.js:2", "old.js:1"] }, o);
+    expect(refs.map((r) => [r.raw, r.side, r.chosenBy])).toEqual([
+      ["b.js:1", "B", "only"],
+      ["m.js:1", "B", "evidence"],
+      ["m.js:2", "A", "better"],
+      ["old.js:1", "base", "only"],
+    ]);
+    const item = resolveEvidence({ aspect: "x", recommendation: "copy from side B", risk: "", betterSide: "A", evidence: ["m.js:1"] }, o);
+    expect(item[0]).toMatchObject({ side: "B", chosenBy: "item" });
+    // checkDuelEvidence: a declared side must match; legacy strings only need to resolve somewhere
+    expect(checkDuelEvidence({ items: [{ aspect: "x", evidence: [{ ref: "b.js:1", side: "A" }] }] }, roots)).toEqual({ unsupported: ["x"], mismatched: ["x: b.js:1 is declared A but exists only in B"], invalid: [] });
+    expect(checkDuelEvidence({ items: [{ aspect: "x", evidence: ["b.js:1", "nope.js:1"] }] }, roots)).toEqual({ unsupported: [], mismatched: [], invalid: ["nope.js:1"] });
   });
 
   it("the judge result records each side's head commit as judged (refs point there)", async () => {

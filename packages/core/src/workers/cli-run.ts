@@ -4,6 +4,7 @@ import type { WorkerEventInput } from "../schemas/worker-events.js";
 import { parseJsonLine } from "../util/jsonl.js";
 import { streamProcess, tail, type ProcEnd, type SpawnSpec } from "../util/proc.js";
 import type { Redactor } from "../util/redact.js";
+import { RATE_LIMIT_RE } from "../util/retry-after.js";
 
 /** Translates one vendor JSONL stream into normalized worker events. */
 export interface StreamParser {
@@ -91,7 +92,6 @@ const QUOTA_RE = /usage limit|rate.?limit|limit reached|quota|\b429\b|too many r
 const AUTH_RE = /\b401\b|\b403\b|invalid.?api.?key|unauthori[sz]ed|authenticat|not logged in|please (run )?\/?log ?in/i;
 const TRANSIENT_RE =
   /\b5\d\d\b|overloaded|internal server error|bad gateway|service unavailable|gateway time-?out|temporarily unavailable|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed|network error/i;
-const PI_RATE_LIMIT_RE = /\b429\b|rate.?limit|too many requests/i;
 
 export type ErrorClass = "quota" | "transient" | "auth" | "model";
 
@@ -107,7 +107,7 @@ export function classifyError(message: string, o: { status?: number | null; vend
   if (s !== null && s >= 500) return "transient";
   if (s === 401 || s === 403) return "auth";
   if (o.vendor === "claude" && (s === 429 || QUOTA_RE.test(message))) return "quota";
-  if (o.vendor === "pi" && (s === 429 || PI_RATE_LIMIT_RE.test(message))) return "transient";
+  if (o.vendor === "pi" && (s === 429 || RATE_LIMIT_RE.test(message))) return "transient";
   if (AUTH_RE.test(message)) return "auth";
   if (TRANSIENT_RE.test(message)) return "transient";
   return "model";

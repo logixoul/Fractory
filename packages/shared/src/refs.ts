@@ -67,8 +67,12 @@ export interface ResolvedRef {
   sha: string;
   /** It also resolved somewhere else; the choice followed the preference order. */
   ambiguous: boolean;
-  /** Why this side was chosen: named in the evidence text or the item text, the item's better side, the only match, or base. */
-  chosenBy: "evidence" | "item" | "better" | "only" | "base";
+  /**
+   * Why this side: "declared" = the judge's `side` field, checked against where it resolves.
+   * The rest are for runs judged before the verdict had a `side` per evidence entry: named in the
+   * evidence text or the item text, the item's better side, the only match, or base.
+   */
+  chosenBy: "declared" | "evidence" | "item" | "better" | "only" | "base";
   /** All places it resolved. */
   resolvedIn: ("A" | "B" | "base")[];
 }

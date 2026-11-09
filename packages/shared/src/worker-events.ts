@@ -48,6 +48,20 @@ export const WorkerEvent = z.discriminatedUnion("type", [
     resetsAt: z.number().optional(),
     windows: z.record(z.string(), QuotaWindow).default({}),
   }),
+  /**
+   * A retry inside the worker CLI (Pi's auto_retry_start/end): "scheduled" before the backoff
+   * sleep, "finished" once the retry sequence ends (success or the final error).
+   */
+  z.object({
+    type: z.literal("provider_retry"),
+    phase: z.enum(["scheduled", "finished"]),
+    attempt: z.number().int().nonnegative(),
+    maxAttempts: z.number().int().nonnegative().optional(),
+    delayMs: z.number().nonnegative().optional(),
+    success: z.boolean().optional(),
+    /** The error that caused the retry (scheduled) or the final error (finished, unsuccessful). */
+    message: z.string().optional(),
+  }),
   z.object({
     type: z.literal("error"),
     kind: z.enum(["quota", "transient", "timeout", "killed", "auth", "process", "protocol", "model"]),

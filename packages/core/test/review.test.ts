@@ -58,6 +58,18 @@ function engine(deepseek: FakeScript[] | ((t: WorkerTask, n: number) => FakeScri
   return { store, run: newTestRun(store), deps, ds };
 }
 
+describe("reasoning level: requested vs effective", () => {
+  it("a mismatch is a run warning; a match is not", async () => {
+    const { run, deps } = engine([
+      { match: "propose", finalText: "plan D", reasoning: { requested: "medium", effective: "high" } },
+      { match: "apply", finalText: "ok", reasoning: { requested: "medium", effective: "medium" }, repeat: true },
+    ]);
+    const st = await drive(run, demoWorkflow(), deps);
+    const w = st.warnings.filter((x) => x.code === "reasoning_level_mismatch");
+    expect(w).toEqual([expect.objectContaining({ stepId: `propose.${labelOf(st, "deepseek")}`, message: "deepseek: requested reasoning 'medium', but the model ran at 'high'" })]);
+  });
+});
+
 describe("2. transient errors: automatic retry with backoff; --retry-failed", () => {
   it("retries a transient failure and logs it", async () => {
     const { run, deps, ds } = engine([transientError, { match: "propose", finalText: "plan D" }]);
@@ -102,7 +114,7 @@ describe("2. transient errors: automatic retry with backoff; --retry-failed", ()
       ++n === 1 ? { actions: [{ writeFile: { path: "partial.txt", content: "half" } }, { emit: { type: "error", kind: "transient", message: "fetch failed" } }] } : writeDiv,
     );
     const deepseek = new FakeWorker("deepseek", () => writeDiv);
-    const glm = new FakeWorker("glm", () => ({ structured: { summary: "s", items: [{ aspect: "a", betterSide: "A", evidence: ["math.js:1"], recommendation: "r", risk: "" }] } }));
+    const glm = new FakeWorker("glm", () => ({ structured: { summary: "s", items: [{ aspect: "a", betterSide: "A", evidence: [{ ref: "math.js:1", side: "A" }], recommendation: "r", risk: "" }] } }));
     const st = await driveRun(run, { dataDir: data, workers: { opus, deepseek, glm } });
     expect(st.status).toBe("awaiting_approval");
     const lo = labelOf(st, "opus");
@@ -174,7 +186,7 @@ describe("9. fractory clean / gc", () => {
     const workers = {
       opus: new FakeWorker("opus", () => writeDiv),
       deepseek: new FakeWorker("deepseek", () => writeDiv),
-      glm: new FakeWorker("glm", () => ({ structured: { summary: "s", items: [{ aspect: "a", betterSide: "A", evidence: ["math.js:1"], recommendation: "r", risk: "" }] } })),
+      glm: new FakeWorker("glm", () => ({ structured: { summary: "s", items: [{ aspect: "a", betterSide: "A", evidence: [{ ref: "math.js:1", side: "A" }], recommendation: "r", risk: "" }] } })),
     };
     let st = await driveRun(run, { dataDir: data, workers });
     expect(st.status).toBe("awaiting_approval");

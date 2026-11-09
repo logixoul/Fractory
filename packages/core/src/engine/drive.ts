@@ -2,6 +2,7 @@ import * as os from "node:os";
 import type { StepFailureKind } from "../schemas/run-events.js";
 import { TERMINAL_STATUSES, type RunState } from "../state/reducer.js";
 import type { RunHandle } from "../store/run-store.js";
+import { RATE_LIMIT_RE, retryAfterMsFromText } from "../util/retry-after.js";
 import { AbortedError, QuotaExhaustedError, ResumeRefusedError, StepFailure } from "./errors.js";
 import { readQuotaBook, windowsOverThreshold } from "./quota-book.js";
 import type { ApprovalGate, EngineDeps, FileChange, StepContext, StepDef, WorkStep, WorkflowDef } from "./types.js";
@@ -219,9 +220,21 @@ type StepOutcome =
   | { kind: "cancelled" };
 
 /**
+ * Delay before step retry n (0-based): a Retry-After in the error text, else
+ * retry.rateLimitBackoffMs for a provider rate limit, else retry.backoffMs.
+ */
+export function stepRetryDelayMs(reason: string, n: number, retry: { backoffMs: number[]; rateLimitBackoffMs: number[] }): number {
+  const after = retryAfterMsFromText(reason);
+  if (after !== undefined) return after;
+  const list = RATE_LIMIT_RE.test(reason) ? retry.rateLimitBackoffMs : retry.backoffMs;
+  return list[Math.min(n, list.length - 1)]!;
+}
+
+/**
  * Runs a step; transient failures (5xx, network, provider rate limits) are retried with
- * backoff up to retry.transientMaxRetries times. Each retry is a new attempt, which restores
- * the step's checkpoint (edit steps) or post-step commit (check steps) first.
+ * backoff up to retry.transientMaxRetries times. This is the last resort: Pi retries rate
+ * limits and 5xx itself first. Each retry is a new attempt, which restores the step's
+ * checkpoint (edit steps) or post-step commit (check steps) first.
  */
 async function runStep(
   run: RunHandle,
@@ -231,13 +244,13 @@ async function runStep(
   siblingSignal: AbortSignal,
   now: () => number,
 ): Promise<StepOutcome> {
-  const { transientMaxRetries, backoffMs } = deps.config.retry;
+  const { transientMaxRetries } = deps.config.retry;
   for (;;) {
     const r = await runStepAttempt(run, step, deps, runSignal, siblingSignal, now);
     if (r.kind !== "failed" || r.failKind !== "transient") return r;
     const done = run.state().retries[step.id] ?? 0;
     if (done >= transientMaxRetries) return r;
-    const delayMs = backoffMs[Math.min(done, backoffMs.length - 1)]!;
+    const delayMs = stepRetryDelayMs(r.reason, done, deps.config.retry);
     run.append({ type: "step_retrying", stepId: step.id, attempt: run.state().steps[step.id]!.attempt, reason: r.reason, delayMs });
     const waited = await sleep(delayMs, [runSignal, siblingSignal]);
     if (!waited) return runSignal.aborted ? { kind: "cancelled" } : r;
