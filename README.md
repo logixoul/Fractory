@@ -123,7 +123,7 @@ All of them print live progress. Exit codes: `0` completed, `1` failed or cancel
 | `fractory cancel <id>` | stop a run; worker process trees are killed |
 | `fractory clean <id>` | remove a finished run's worktrees (branches are kept) |
 | `fractory gc --older-than <days>` | clean all finished runs older than N days |
-| `fractory serve [--repo <path>]` | start the local daemon and open the GUI; `--repo` (default: the current directory, if inside a git repo) is pre-filled in the GUI's new-run form |
+| `fractory serve [--repo <path>] [--port <n>]` | start the local daemon on `127.0.0.1:4000` (`--port 0`: any free port) and open the GUI; `--repo` (default: the current directory, if inside a git repo) is pre-filled in the GUI's new-run form |
 
 Things worth knowing:
 

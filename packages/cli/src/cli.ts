@@ -48,7 +48,9 @@ export interface CliIo {
 }
 
 /** Exit codes: 0 completed/ok, 1 error/failed/cancelled, 2 paused (quota, approval, attention). */
-export const EXIT = { ok: 0, failed: 1, paused: 2, usage: 64 } as const;
+export const DEFAULT_PORT = 4000;
+
+export const EXIT ={ ok: 0, failed: 1, paused: 2, usage: 64 } as const;
 
 const exitFor = (st: RunState): number =>
   st.status === "completed" ? EXIT.ok : st.status === "failed" || st.status === "cancelled" ? EXIT.failed : EXIT.paused;
@@ -217,7 +219,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
   program
     .command("serve")
     .description("start the local daemon (127.0.0.1 only) and open the GUI; Ctrl-C stops it")
-    .option("--port <n>", "port (default: any free port)", "0")
+    .option("--port <n>", "port (0 = any free port)", String(DEFAULT_PORT))
     .option("--no-open", "do not open a browser")
     .option("--repo <path>", "repository pre-filled in the GUI's new-run form (default: the current directory, if inside a git repository)")
     .action(async (o: { port: string; open: boolean; repo?: string }) => {
@@ -240,6 +242,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         port,
         ...(defaultWebDir() ? { webDir: defaultWebDir()! } : {}),
         ...(io.workers ? { workers: io.workers } : {}),
+      }).catch((e: NodeJS.ErrnoException) => {
+        if (e.code === "EADDRINUSE") throw new UserError(`port ${port} is already in use; pass --port <n> (or --port 0 for any free port)`);
+        throw e;
       });
       io.out(`fractory daemon listening on ${d.url}\nGUI: ${d.guiUrl}\n(single-use login link, valid for 60 s; press Enter here for a new one)\n`);
       if (defaultRepo) io.out(`new runs default to the repository ${defaultRepo}\n`);

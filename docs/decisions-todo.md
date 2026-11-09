@@ -324,3 +324,9 @@ Requested: launch a run from the web UI, with the prompt typed into a textarea (
 - [ ] **Start warnings are shared** (`startWarnings` in core): the CLI prints them, `POST /api/runs` returns them, and the form shows them before you start. So far there's one (`review.testCommand` not set); the dirty-repo warning is still recorded on the run as before.
 - [ ] **The prompt draft is kept in `sessionStorage`** (per tab, cleared after a successful start), so a reload doesn't lose it. Typed prompts are saved by the daemon under `<dataDir>/prompts/` (existing behaviour of `POST /api/runs`) and snapshotted into the run.
 - [ ] **No config preview in the form** (which models/reasoning a run will use). It could come from the same repo-check call if wanted.
+
+## Fixed daemon port (2026-11-10)
+
+Requested: a stable GUI URL instead of a random port.
+
+- [ ] **`fractory serve` defaults to `127.0.0.1:4000`**; `--port 0` still means any free port. 4000 is also Phoenix's and Jekyll's default, so a clash is possible. A port in use is a clear user error (exit 1) with no fallback to another port, because a silent fallback would bring back the changing URL. The login link is still needed after every restart, because the token is per launch.

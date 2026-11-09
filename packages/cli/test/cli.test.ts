@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { FakeWorker, type Config, type WorkerTask } from "@fractory/core";
-import { EXIT, runCli } from "../src/cli.js";
+import { DEFAULT_PORT, EXIT, runCli } from "../src/cli.js";
 
 const dirs: string[] = [];
 const tmp = () => {
@@ -180,6 +181,20 @@ describe("fractory CLI", () => {
     const bad = io();
     expect(await runCli(["serve", "--port", "0", "--no-open", "--repo", tmp()], bad.io)).toBe(EXIT.failed);
     expect(bad.err.join("")).toMatch(/not inside a git repository/);
+  });
+
+  it("serve defaults to port 4000; a port in use is a user error, not a stack trace", async () => {
+    expect(DEFAULT_PORT).toBe(4000);
+    const blocker = net.createServer();
+    await new Promise<void>((res) => blocker.listen(0, "127.0.0.1", res));
+    const taken = (blocker.address() as net.AddressInfo).port;
+    try {
+      const t = io({ openBrowser: () => {} });
+      expect(await runCli(["serve", "--port", String(taken), "--no-open"], t.io)).toBe(EXIT.failed);
+      expect(t.err.join("")).toBe(`error: port ${taken} is already in use; pass --port <n> (or --port 0 for any free port)\n`);
+    } finally {
+      await new Promise((res) => blocker.close(res));
+    }
   });
 
   it("reports user errors without a stack and with exit 1; usage errors exit 64", async () => {
