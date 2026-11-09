@@ -46,10 +46,14 @@
       .join("|"),
   );
 
+  // One string for everything the file list depends on: `st` and `branchLabels` are new objects
+  // after every streamed event, this only changes when the run id, branches or step statuses do.
+  const changesRequest = $derived(JSON.stringify([isBranchView && setupDone, st.runId, branchLabels, branchVersion]));
+
   $effect(() => {
-    if (!isBranchView || !setupDone) return;
-    void branchVersion; // refetch as the branches evolve
-    Promise.all(branchLabels.map((l) => getJson<string[]>(`/api/runs/${st.runId}/changes/${l}`)))
+    const [active, runId, ls] = JSON.parse(changesRequest) as [boolean, string, string[]];
+    if (!active) return;
+    Promise.all(ls.map((l) => getJson<string[]>(`/api/runs/${runId}/changes/${l}`)))
       .then((lists) => {
         files = [...new Set(lists.flat())].sort();
         if (selected === null || !files.includes(selected)) selected = files[0] ?? null;

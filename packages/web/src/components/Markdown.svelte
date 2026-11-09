@@ -33,15 +33,24 @@
   let error = $state<string | null>(null);
   let el: HTMLDivElement | undefined = $state();
 
+  // Props like `runId={st.runId}` are getters over the parent's whole run state, which is replaced
+  // on every streamed event. $derived only signals when the value changes, so the document is
+  // fetched once per file instead of being blanked ("loading…") and refetched several times a second.
+  const textValue = $derived(text);
+  const url = $derived(runId && file ? runFile(runId, file) : null);
+
   $effect(() => {
-    if (text !== undefined) {
-      source = text;
+    if (textValue !== undefined) {
+      source = textValue;
       return;
     }
-    if (!runId || !file) return;
+    const u = url;
+    if (!u) return;
     source = null;
-    getText(runFile(runId, file))
-      .then((t) => (source = t))
+    getText(u)
+      .then((t) => {
+        if (u === url) source = t;
+      })
       .catch((e: Error) => (error = e.message));
   });
 

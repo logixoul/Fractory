@@ -12,13 +12,16 @@
   /** What is shown now: a refetch with identical content leaves Monaco untouched. */
   let shown: { key: string; a: string; b: string } | null = null;
 
-  const blob = (rev: string) => getText(`/api/runs/${encodeURIComponent(runId)}/blob?rev=${encodeURIComponent(rev)}&path=${encodeURIComponent(file)}`);
+  // The props are getters over the parent's run state, which is replaced on every streamed event.
+  // One derived string signals only when an input really changes, so nothing is refetched in between.
+  const request = $derived(JSON.stringify([runId, file, left, right, version]));
 
   $effect(() => {
-    void version;
+    const [rid, file, left, right] = JSON.parse(request) as [string, string, string, string];
     const target = host;
     if (!target) return;
     let cancelled = false;
+    const blob = (rev: string) => getText(`/api/runs/${encodeURIComponent(rid)}/blob?rev=${encodeURIComponent(rev)}&path=${encodeURIComponent(file)}`);
     (async () => {
       try {
         const [monaco, a, b] = await Promise.all([loadMonaco(), blob(left), blob(right)]);
