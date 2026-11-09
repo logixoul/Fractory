@@ -2,9 +2,10 @@
 // Opt-in REAL-MODEL smoke test. Never run by `npm test`. You run it by hand:
 //   npm run build && node scripts/smoke-real.mjs [--claude] [--pi] [--glm] [--gpt] [--opus]
 // Default: all three (Claude, and DeepSeek and the GLM-5.3 Flash judge via Pi on Baseten); Claude uses --model haiku (conserve Pro quota), --opus for Opus. All use the default reasoning (medium; the GLM judge high).
-// Pi needs BASETEN_API_KEY in .dev.vars (repo root). Cost: one tiny call per worker.
+// Pi needs BASETEN_API_KEY in the global config's envFile (else .dev.vars in the repo root).
+// Cost: one tiny call per worker.
 // --gpt (opt-in, not part of the default set): the review workflow's reviewer, gpt-6.1-sol via
-// Pi's openai provider; needs OPENAI_API_KEY in .dev.vars.
+// Pi's openai provider; needs OPENAI_API_KEY in the same file.
 //
 // Each worker gets a read-only task in a fresh worktree of a scratch repo, with a sibling
 // worktree holding a "secret" it must not be able to read. Checks: done event, session id,
@@ -22,6 +23,7 @@ import {
   ensureWorktree,
   evaluateGates,
   gatesPassed,
+  loadConfig,
   parseEnvFile,
   revParse,
   takeBaseline,
@@ -56,8 +58,11 @@ fs.writeFileSync(path.join(other.path, "secret.txt"), SECRET);
 const targets = { mainRepo: repo, worktrees: { aaaa: own.path, bbbb: other.path } };
 const snap = { maxIgnoredFileBytes: 1 << 20, excludeDirs: DEFAULT_EXCLUDE_DIRS };
 
-const devVars = path.join(root, ".dev.vars");
-const secretEnv = fs.existsSync(devVars) ? parseEnvFile(fs.readFileSync(devVars, "utf8")) : {};
+// Keys come from the envFile of the global fractory config (as for real runs; FRACTORY_CONFIG_DIR
+// overrides its location), else from .dev.vars in the repo root.
+const envFile = loadConfig().config.envFile ?? path.join(root, ".dev.vars");
+const secretEnv = fs.existsSync(envFile) ? parseEnvFile(fs.readFileSync(envFile, "utf8")) : {};
+console.log(`keys: ${fs.existsSync(envFile) ? envFile : "none (no envFile in the global config, no .dev.vars)"}`);
 const redactor = new Redactor(Object.values(secretEnv));
 
 const prompt = `Read math.js in the current directory and reply with the name of the exported function.
@@ -109,7 +114,7 @@ for (const [flag, id] of [["pi", "deepseek"], ["glm", "glm"], ["gpt", "gpt"]]) {
   if (!want[flag]) continue;
   const piKey = PiWorkerConfig.parse(defaults[id]).passEnv[0];
   if (!secretEnv[piKey]) {
-    console.log(`\n== ${id} skipped: no ${piKey} in .dev.vars`);
+    console.log(`\n== ${id} skipped: no ${piKey} in ${envFile}`);
     continue;
   }
   const cfg = PiWorkerConfig.parse(defaults[id]);
