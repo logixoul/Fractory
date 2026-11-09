@@ -37,9 +37,18 @@
     st.workflow === "review" ? Object.keys((st.steps.setup?.result as { branches?: Record<string, string> } | undefined)?.branches ?? {}) : labels,
   );
 
+  // Branches only move when the orchestrator commits, i.e. at step boundaries. Keying refetches on
+  // step statuses (not on every streamed event, e.g. judge reasoning) keeps the diff from reloading,
+  // flickering and losing its scroll position several times a second.
+  const branchVersion = $derived(
+    Object.entries(st.steps)
+      .map(([id, s]) => `${id}:${s.status}`)
+      .join("|"),
+  );
+
   $effect(() => {
     if (!isBranchView || !setupDone) return;
-    void st.lastSeq; // refetch as the branches evolve
+    void branchVersion; // refetch as the branches evolve
     Promise.all(branchLabels.map((l) => getJson<string[]>(`/api/runs/${st.runId}/changes/${l}`)))
       .then((lists) => {
         files = [...new Set(lists.flat())].sort();
@@ -81,7 +90,7 @@
       <div>
         {#if selected}
           <div class="row muted small"><span>left: {sides[0] === "base" ? "base" : who(sides[0])}</span><span>→ right: {who(sides[1])}</span></div>
-          <DiffView runId={st.runId} file={selected} left={sides[0]} right={sides[1]} version={st.lastSeq} />
+          <DiffView runId={st.runId} file={selected} left={sides[0]} right={sides[1]} version={branchVersion} />
         {/if}
       </div>
     </div>
