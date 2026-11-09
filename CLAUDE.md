@@ -38,3 +38,4 @@ Local multi-model orchestrator: Opus (Claude Code, Pro subscription) and DeepSee
 
 ## Workflow
 - Milestones M0–M7 (see `spec.md`). Commit after each with `npm run typecheck && npm test` green, then stop for review.
+- At the end of every milestone, append a `## Mn` section to `docs/decisions-todo.md` listing each judgment call made in that milestone that the user should review (choice, reason, what changing it affects). Don't repeat binding §8 requirements.
