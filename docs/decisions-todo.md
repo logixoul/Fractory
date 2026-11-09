@@ -119,3 +119,32 @@ Binding requirements you already set (docs/interfaces.md §8) are not repeated h
 - [ ] **Per-repo `setup` runs once per contestant worktree at duel setup**, and again after any clean that removed files. The judge worktree gets no setup.
 - [ ] **`report.md` is written by the orchestrator.** It covers branches, heads, files changed, fix iterations and check status per side; the judge summary and items with approved ones ticked; the apply worker's summary; and the recheck results.
 - [ ] **CLI:** a duel that pauses for approval exits with code 2 and prints the items. `fractory approve <id> --items 1,3` then `fractory resume <id>` finish it. The final output lists the branches, which are never merged or pushed.
+
+## M5: daemon and security
+
+API, all under `/api` and all requiring the token:
+- `GET` `health`, `runs`, `runs/:id`, `runs/:id/events?since=`
+- `GET runs/:id/events/stream`: SSE that replays from `Last-Event-ID` or `?since=`, then tails the log
+- `GET runs/:id/file?path=`, `runs/:id/diff/:label`, `quota`
+- `POST` `runs` (`{workflow, repo, prompt | promptFile}`), `runs/:id/approve` (`{items}`), `runs/:id/resume` (`{force?}`), `runs/:id/cancel`
+
+- [ ] **The token can arrive three ways:** an `Authorization: Bearer` header, `?token=` in the URL (the GUI link and `EventSource`, which can't set headers), or a cookie.
+  - The cookie is HttpOnly, SameSite=Strict and named per port. It's set from a valid `?token=`, so the GUI's assets and API calls work without the token in every URL.
+  - A state-changing request authenticated only by the cookie must also carry our `Origin`.
+  - The token is 32 random bytes per launch, compared in constant time.
+- [ ] **The token is visible in the browser's address bar and history** after `fractory serve` opens the GUI, and in the process list of the browser launch.
+  - Mitigations: `Referrer-Policy: no-referrer`, and in M6 the GUI will remove it from the address bar right after loading.
+  - *Alternative:* a one-time code exchanged for the cookie.
+- [ ] **Host and Origin rules:** the Host must be `127.0.0.1:<port>` or `localhost:<port>`. The Origin, if sent, must be `http://127.0.0.1:<port>` or `http://localhost:<port>`. `Sec-Fetch-Site: cross-site` and `same-site` are refused. Preflights (`OPTIONS`) get 405, and no `Access-Control-*` header is ever sent.
+- [ ] **Security headers on every response:** CSP `default-src 'self'` (inline styles allowed, which Monaco needs), `nosniff`, `X-Frame-Options: DENY`, COOP/CORP same-origin, `Cache-Control: no-store`.
+- [ ] **Run files are always served as `text/plain`**, so model output can never render as HTML from the daemon's origin; the GUI renders markdown itself, sanitized. Paths are realpath-confined to the run directory, and files are capped at 5 MiB.
+- [ ] **The daemon drives runs in its own process.** One driver per run is allowed; the run's lock still protects against a CLI driving the same run, which gets a 409.
+  - Refusals that happen at start (lock held, unapproved gate, quota not reset) come back as 409 with the reason.
+  - When the daemon stops, it cancels its active drivers. They can be resumed later from the CLI or the GUI.
+- [ ] **The daemon never resumes interrupted runs by itself** after a restart. A run left "running" by a crash stays that way until you resume it.
+- [ ] **SSE polls the event log every 250 ms**, reading only new bytes. It sends a heartbeat every 15 s, and an `end` event once the run is finished and fully sent. Event ids are the log's seq numbers, so a reconnect with `Last-Event-ID` resumes exactly.
+- [ ] **A prompt sent as text over the API is saved as a file** in `<dataDir>/prompts/`, then snapshotted into the run like a CLI prompt file.
+- [ ] **`fractory serve` options:** `--port` defaults to any free port, and `--no-open` skips the browser.
+  - The browser is opened without a shell: `rundll32 url.dll,FileProtocolHandler` on Windows, `open` on macOS, `xdg-open` on Linux.
+  - Ctrl-C stops the daemon.
+- [ ] **The daemon serves the built GUI from `packages/web/dist`** when it exists. Until M6, it shows a placeholder page.

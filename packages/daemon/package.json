@@ -1,0 +1,20 @@
+{
+  "name": "@fractory/daemon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@fractory/core": "0.1.0",
+    "@hono/node-server": "^2.1.6",
+    "hono": "^4.13.17",
+    "zod": "^4.6.7"
+  }
+}

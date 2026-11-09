@@ -1,0 +1,241 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { Hono, type Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import { streamSSE } from "hono/streaming";
+import { z } from "zod";
+import {
+  EventTail,
+  FRACTORY_VERSION,
+  LockedError,
+  ResumeRefusedError,
+  RunNotFoundError,
+  TERMINAL_STATUSES,
+  approveRun,
+  createRun,
+  dataPaths,
+  isInside,
+  loadConfig,
+  randomHex,
+  readQuotaBook,
+  squashedDiff,
+  worktreeBranch,
+  type RunStore,
+} from "@fractory/core";
+import { ConflictError, type DriverPool } from "./drivers.js";
+import { security, securityHeaders } from "./security.js";
+
+export interface AppDeps {
+  store: RunStore;
+  pool: DriverPool;
+  dataDir: string;
+  configDir: string;
+  token: string;
+  port: () => number;
+  /** Built GUI (packages/web/dist). Optional until M6. */
+  webDir?: string;
+  /** SSE poll interval (ms). */
+  tailMs?: number;
+  heartbeatMs?: number;
+}
+
+const StartBody = z
+  .object({
+    workflow: z.enum(["consensus", "duel"]),
+    repo: z.string().min(1),
+    prompt: z.string().min(1).optional(),
+    promptFile: z.string().min(1).optional(),
+  })
+  .strict()
+  .refine((b) => (b.prompt === undefined) !== (b.promptFile === undefined), "give exactly one of prompt or promptFile");
+const ApproveBody = z.object({ items: z.array(z.number().int().positive()) }).strict();
+const ResumeBody = z.object({ force: z.boolean().optional() }).strict();
+
+const MAX_FILE_BYTES = 5 * 1024 * 1024;
+
+export function createApp(d: AppDeps): Hono {
+  const app = new Hono();
+  app.use("*", securityHeaders);
+  app.use("*", security({ token: d.token, port: d.port }));
+  app.use("/api/*", bodyLimit({ maxSize: 1024 * 1024, onError: (c) => c.json({ error: "request body too large" }, 413) }));
+
+  app.onError((e, c) => {
+    if (e instanceof RunNotFoundError) return c.json({ error: e.message }, 404);
+    if (e instanceof ConflictError || e instanceof LockedError || e instanceof ResumeRefusedError) return c.json({ error: e.message }, 409);
+    if (e instanceof BadRequest) return c.json({ error: e.message }, 400);
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  });
+
+  const body = async <T extends z.ZodType>(c: Context, schema: T): Promise<z.infer<T>> => {
+    let raw: unknown = {};
+    const text = await c.req.text();
+    if (text.trim() !== "") {
+      try {
+        raw = JSON.parse(text);
+      } catch {
+        throw new BadRequest("body is not valid JSON");
+      }
+    }
+    const r = schema.safeParse(raw);
+    if (!r.success) throw new BadRequest(z.prettifyError(r.error));
+    return r.data;
+  };
+  const runOf = (c: Context) => d.store.open(c.req.param("id")!);
+  const view = (runId: string) => ({ ...d.store.open(runId).state(), driving: d.pool.isActive(runId), driverError: d.pool.lastError.get(runId) ?? null });
+
+  app.get("/api/health", (c) => c.json({ ok: true, version: FRACTORY_VERSION }));
+
+  app.get("/api/runs", (c) =>
+    c.json(
+      d.store.list().map((r) =>
+        r.state
+          ? {
+              runId: r.runId,
+              workflow: r.state.workflow,
+              status: r.state.status,
+              repo: r.state.repo,
+              createdAt: r.state.createdAt,
+              updatedAt: r.state.updatedAt,
+              driving: d.pool.isActive(r.runId),
+            }
+          : { runId: r.runId, status: "unreadable", error: r.error ?? null },
+      ),
+    ),
+  );
+
+  app.post("/api/runs", async (c) => {
+    const b = await body(c, StartBody);
+    const repo = path.resolve(b.repo);
+    let promptFile = b.promptFile ? path.resolve(b.promptFile) : undefined;
+    if (b.prompt !== undefined) {
+      const dir = path.join(d.dataDir, "prompts");
+      fs.mkdirSync(dir, { recursive: true });
+      promptFile = path.join(dir, `${Date.now()}-${randomHex(4)}.md`);
+      fs.writeFileSync(promptFile, b.prompt);
+    }
+    const loaded = loadConfig({ repo, configDir: d.configDir });
+    const run = await createRun(d.store, { workflow: b.workflow, repo, promptFile: promptFile!, config: loaded.config }).catch((e: Error) => {
+      throw new BadRequest(e.message);
+    });
+    await d.pool.start(run.runId);
+    return c.json({ runId: run.runId, warnings: loaded.warnings }, 202);
+  });
+
+  app.get("/api/runs/:id", (c) => c.json(view(runOf(c).runId)));
+
+  app.get("/api/runs/:id/events", (c) => {
+    const since = Number(c.req.query("since") ?? 0) || 0;
+    return c.json(runOf(c).events(since));
+  });
+
+  // Live events: replay from Last-Event-ID / ?since=, then tail (reconnect-safe: ids are seqs).
+  app.get("/api/runs/:id/events/stream", (c) => {
+    const run = runOf(c);
+    const since = Number(c.req.header("last-event-id") ?? c.req.query("since") ?? 0) || 0;
+    const tail = new EventTail(run.eventsFile, since);
+    return streamSSE(c, async (s) => {
+      let closed = false;
+      s.onAbort(() => {
+        closed = true;
+      });
+      let lastBeat = Date.now();
+      while (!closed) {
+        const evs = tail.read();
+        for (const e of evs) await s.writeSSE({ id: String(e.seq), event: "run_event", data: JSON.stringify(e) });
+        if (evs.length === 0) {
+          const st = d.store.open(run.runId).state();
+          if (TERMINAL_STATUSES.has(st.status) && st.lastSeq <= tail.lastSeq && !d.pool.isActive(run.runId)) {
+            await s.writeSSE({ event: "end", data: JSON.stringify({ status: st.status }) });
+            return;
+          }
+          if (Date.now() - lastBeat > (d.heartbeatMs ?? 15_000)) {
+            await s.writeSSE({ event: "ping", data: "" });
+            lastBeat = Date.now();
+          }
+          await s.sleep(d.tailMs ?? 250);
+        }
+      }
+    });
+  });
+
+  // Text files of a run (proposals, critiques, decision.md, report.md, inputs). Always served as
+  // text/plain: model output is never rendered by the browser as HTML from this origin.
+  app.get("/api/runs/:id/file", (c) => {
+    const run = runOf(c);
+    const rel = c.req.query("path");
+    if (!rel) throw new BadRequest("missing ?path=");
+    const root = fs.realpathSync.native(run.dir);
+    const abs = path.resolve(root, rel);
+    let real: string;
+    try {
+      real = fs.realpathSync.native(abs);
+    } catch {
+      return c.json({ error: "no such file" }, 404);
+    }
+    if (!isInside(real, root) || !fs.statSync(real).isFile()) return c.json({ error: "path outside the run" }, 403);
+    if (fs.statSync(real).size > MAX_FILE_BYTES) return c.json({ error: "file too large" }, 413);
+    return c.body(fs.readFileSync(real), 200, { "Content-Type": "text/plain; charset=utf-8" });
+  });
+
+  // Squashed diff of a duel branch against the base (Monaco compare view).
+  app.get("/api/runs/:id/diff/:label", async (c) => {
+    const st = runOf(c).state();
+    const label = c.req.param("label");
+    const setup = st.steps.setup?.result as { base?: string; branches?: Record<string, string> } | undefined;
+    if (!setup?.base || !setup.branches?.[label]) return c.json({ error: "no branch for this label" }, 404);
+    const diff = await squashedDiff(st.repo, setup.base, worktreeBranch(st.runId, label));
+    return c.body(diff, 200, { "Content-Type": "text/plain; charset=utf-8" });
+  });
+
+  app.post("/api/runs/:id/approve", async (c) => {
+    const b = await body(c, ApproveBody);
+    const approved = approveRun(runOf(c), b.items);
+    return c.json({ approved });
+  });
+
+  app.post("/api/runs/:id/resume", async (c) => {
+    const b = await body(c, ResumeBody);
+    const run = runOf(c);
+    await d.pool.start(run.runId, b.force ?? false);
+    return c.json({ runId: run.runId, driving: true }, 202);
+  });
+
+  app.post("/api/runs/:id/cancel", (c) => c.json({ result: d.pool.cancel(runOf(c).runId) }));
+
+  app.get("/api/quota", (c) => c.json(readQuotaBook(dataPaths(d.dataDir).quotaFile)));
+
+  // GUI (SPA): static files from webDir, index.html fallback for client-side routes.
+  app.get("*", (c) => {
+    if (c.req.path.startsWith("/api/")) return c.json({ error: "not found" }, 404);
+    if (!d.webDir || !fs.existsSync(path.join(d.webDir, "index.html"))) {
+      return c.html("<!doctype html><title>fractory</title><p>fractory daemon is running. The GUI is not built yet (<code>npm run build</code>).</p>");
+    }
+    const root = fs.realpathSync.native(d.webDir);
+    const rel = decodeURIComponent(c.req.path).replace(/^\/+/, "");
+    let file = path.resolve(root, rel);
+    if (!isInside(file, root) || !fs.existsSync(file) || !fs.statSync(file).isFile()) file = path.join(root, "index.html");
+    return c.body(fs.readFileSync(file), 200, { "Content-Type": contentType(file) });
+  });
+
+  return app;
+}
+
+class BadRequest extends Error {}
+
+const TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".map": "application/json",
+};
+
+function contentType(file: string): string {
+  return TYPES[path.extname(file).toLowerCase()] ?? "application/octet-stream";
+}

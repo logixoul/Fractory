@@ -22,6 +22,8 @@ import {
   type RunState,
   type Worker,
 } from "@fractory/core";
+import { startDaemon } from "@fractory/daemon";
+import { defaultWebDir, openBrowser } from "./browser.js";
 import { formatEvent, formatItem, formatRunList, formatShow } from "./format.js";
 
 export interface CliIo {
@@ -32,6 +34,8 @@ export interface CliIo {
   workers?: (config: Config, ctx: { dataDir: string; repo: string; redactor: Redactor }) => Record<string, Worker>;
   /** External cancellation (the bin wires SIGINT/SIGTERM to this). */
   signal?: AbortSignal;
+  /** Test hook: how the GUI URL is opened (default: the OS browser). */
+  openBrowser?: (url: string) => void;
   /** Progress poll interval (ms). */
   pollMs?: number;
 }
@@ -160,9 +164,30 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
 
   program
     .command("serve")
-    .description("start the local daemon and open the GUI (M5)")
-    .action(() => {
-      throw new UserError("the daemon and GUI arrive in milestones M5/M6");
+    .description("start the local daemon (127.0.0.1 only) and open the GUI; Ctrl-C stops it")
+    .option("--port <n>", "port (default: any free port)", "0")
+    .option("--no-open", "do not open a browser")
+    .action(async (o: { port: string; open: boolean }) => {
+      const c = ctx();
+      const port = Number(o.port);
+      if (!Number.isInteger(port) || port < 0 || port > 65535) throw new UserError(`invalid --port: ${o.port}`);
+      const d = await startDaemon({
+        dataDir: c.dataDir,
+        configDir: c.configDir,
+        env: io.env,
+        port,
+        ...(defaultWebDir() ? { webDir: defaultWebDir()! } : {}),
+        ...(io.workers ? { workers: io.workers } : {}),
+      });
+      io.out(`fractory daemon listening on ${d.url}\nGUI: ${d.guiUrl}\n(the URL contains the per-launch token: do not share it)\n`);
+      if (o.open) (io.openBrowser ?? openBrowser)(d.guiUrl);
+      await new Promise<void>((resolve) => {
+        if (!io.signal) return; // runs until the process is killed
+        if (io.signal.aborted) return resolve();
+        io.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      io.out("stopping daemon…\n");
+      await d.close();
     });
 
   try {

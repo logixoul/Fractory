@@ -135,6 +135,24 @@ describe("fractory CLI", () => {
     expect(JSON.parse(s.out.join("")).status).toBe("cancelled");
   });
 
+  it("serve: prints the tokened GUI URL, opens it, answers on 127.0.0.1, stops on abort", async () => {
+    const ac = new AbortController();
+    const opened: string[] = [];
+    const t = io({ signal: ac.signal, openBrowser: (u) => opened.push(u) });
+    const done = runCli(["serve", "--port", "0"], t.io);
+    for (let i = 0; i < 200 && !t.out.join("").includes("GUI:"); i++) await new Promise((r) => setTimeout(r, 10));
+    const gui = /GUI: (\S+)/.exec(t.out.join(""))![1]!;
+    expect(gui).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/\?token=[\w-]{43,}$/);
+    expect(opened).toEqual([gui]);
+    const u = new URL(gui);
+    const health = await fetch(`${u.origin}/api/health`, { headers: { authorization: `Bearer ${u.searchParams.get("token")}` } });
+    expect(health.status).toBe(200);
+    expect((await fetch(`${u.origin}/api/health`)).status).toBe(401);
+    ac.abort();
+    expect(await done).toBe(EXIT.ok);
+    await expect(fetch(`${u.origin}/api/health`)).rejects.toThrow();
+  });
+
   it("reports user errors without a stack and with exit 1; usage errors exit 64", async () => {
     const t = io();
     expect(await runCli(["show", "20260101-000000-zzzz"], t.io)).toBe(EXIT.failed);

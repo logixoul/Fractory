@@ -9,6 +9,11 @@
   "main": "dist/cli.js",
   "dependencies": {
     "@fractory/core": "0.1.0",
-    "commander": "^15.1.0"
+    "@fractory/daemon": "0.1.0",
+    "commander": "^15.1.0",
+    "cross-spawn": "^7.0.6"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "^6.0.6"
   }
 }

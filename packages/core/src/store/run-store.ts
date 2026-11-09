@@ -291,3 +291,56 @@ export class RunStore {
     return out;
   }
 }
+
+/**
+ * Incremental reader of a run's events.jsonl for live tailing (daemon SSE): reads only the
+ * bytes appended since the last call, and only complete lines (a torn tail is left for later).
+ * Works while another process is the writer.
+ */
+export class EventTail {
+  #offset = 0;
+  #lastSeq: number;
+
+  constructor(
+    readonly eventsFile: string,
+    sinceSeq = 0,
+  ) {
+    this.#lastSeq = sinceSeq;
+  }
+
+  get lastSeq(): number {
+    return this.#lastSeq;
+  }
+
+  /** New events with seq > the last one returned (or > sinceSeq). */
+  read(): RunEvent[] {
+    let fd: number;
+    try {
+      fd = fs.openSync(this.eventsFile, "r");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw e;
+    }
+    try {
+      const size = fs.fstatSync(fd).size;
+      if (size < this.#offset) this.#offset = 0; // truncated (torn-tail repair): rescan
+      if (size === this.#offset) return [];
+      const buf = Buffer.alloc(size - this.#offset);
+      const n = fs.readSync(fd, buf, 0, buf.length, this.#offset);
+      const complete = buf.subarray(0, buf.subarray(0, n).lastIndexOf(0x0a) + 1);
+      this.#offset += complete.length;
+      const out: RunEvent[] = [];
+      for (const line of complete.toString("utf8").split("\n")) {
+        if (line === "") continue;
+        const ev = RunEvent.parse(JSON.parse(line));
+        if (ev.seq > this.#lastSeq) {
+          out.push(ev);
+          this.#lastSeq = ev.seq;
+        }
+      }
+      return out;
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+}

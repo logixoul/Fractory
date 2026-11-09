@@ -3,7 +3,17 @@
   "compilerOptions": {
     "noEmit": true,
     "rootDir": "..",
-    "paths": { "@fractory/core": ["../core/src/index.ts"] }
+    "paths": {
+      "@fractory/core": [
+        "../core/src/index.ts"
+      ],
+      "@fractory/daemon": [
+        "../daemon/src/index.ts"
+      ]
+    }
   },
-  "include": ["src", "test"]
+  "include": [
+    "src",
+    "test"
+  ]
 }
