@@ -1,27 +1,19 @@
 <script lang="ts">
   import { getJson, postJson } from "../lib/api.js";
+  import { clearDraft, loadDraft, saveDraft, type Workflow } from "../lib/draft.js";
   import type { RepoCheck, StartInfo } from "../lib/types.js";
 
-  type Workflow = "review" | "consensus" | "duel";
   const WORKFLOWS: { id: Workflow; text: string }[] = [
     { id: "review", text: "one model implements, the other reviews; findings confirmed by tests" },
     { id: "consensus", text: "both models design independently, critique each other, converge on a decision" },
     { id: "duel", text: "both models implement in separate worktrees; a judge compares the diffs" },
   ];
 
-  const DRAFT_KEY = "fractory.newRun.draft";
-  const loadDraft = (): { workflow?: Workflow; prompt?: string } => {
-    try {
-      return JSON.parse(sessionStorage.getItem(DRAFT_KEY) ?? "{}") as { workflow?: Workflow; prompt?: string };
-    } catch {
-      return {};
-    }
-  };
   const draft = loadDraft();
 
   let workflow = $state<Workflow>(draft.workflow ?? "review");
   let prompt = $state(draft.prompt ?? "");
-  let repo = $state("");
+  let repo = $state(draft.repo ?? "");
   let info = $state<StartInfo | null>(null);
   let check = $state<RepoCheck | null>(null);
   let checking = $state(false);
@@ -39,12 +31,7 @@
 
   // Keep the draft per browser tab, so a reload or a misclick does not lose a long prompt.
   $effect(() => {
-    const d = JSON.stringify({ workflow, prompt });
-    try {
-      sessionStorage.setItem(DRAFT_KEY, d);
-    } catch {
-      /* storage unavailable */
-    }
+    saveDraft({ workflow, prompt, ...(repo.trim() ? { repo } : {}) });
   });
 
   // Live repo check, debounced; stale answers are dropped.
@@ -81,11 +68,7 @@
     error = null;
     try {
       const r = await postJson<{ runId: string }>("/api/runs", { workflow, repo: check.root, prompt });
-      try {
-        sessionStorage.removeItem(DRAFT_KEY);
-      } catch {
-        /* storage unavailable */
-      }
+      clearDraft();
       location.hash = `#/run/${r.runId}`;
     } catch (e) {
       error = (e as Error).message;

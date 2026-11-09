@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { postJson } from "../lib/api.js";
+  import { getText, postJson, runFile } from "../lib/api.js";
+  import { loadDraft, saveDraft, type Workflow } from "../lib/draft.js";
   import { LiveRun } from "../lib/live.svelte.js";
   import { buildPanes, phaseStatuses } from "../lib/panes.js";
   import Compare from "./Compare.svelte";
@@ -22,6 +23,36 @@
   const terminal = $derived(st ? ["completed", "failed", "cancelled"].includes(st.status) : true);
   const outcome = $derived(st?.result as { forfeited?: string[]; winner?: { label: string; workerId: string; branch: string } } | undefined);
   const canResume =$derived(!!st && !st.driving && ["paused_quota", "needs_attention", "running"].includes(st.status));
+
+  // The run's prompt snapshot (runs/<id>/prompt.md), so a failed run never loses what was asked.
+  let prompt = $state<string | null>(null);
+  let promptError = $state<string | null>(null);
+  let copied = $state(false);
+  $effect(() => {
+    void getText(runFile(runId, "prompt.md"))
+      .then((t) => (prompt = t))
+      .catch((e: Error) => (promptError = e.message));
+  });
+  const promptPreview = $derived(prompt?.split(/\r?\n/).find((l) => l.trim() !== "")?.trim() ?? "");
+
+  async function copyPrompt() {
+    if (prompt === null) return;
+    try {
+      await navigator.clipboard.writeText(prompt);
+      copied = true;
+      setTimeout(() => (copied = false), 1500);
+    } catch (e) {
+      actionError = `copy failed: ${(e as Error).message}`;
+    }
+  }
+
+  function newRunFromPrompt() {
+    if (prompt === null || !st) return;
+    const existing = loadDraft().prompt?.trim();
+    if (existing && existing !== prompt.trim() && !confirm("Replace the unsent draft in the New run form with this run's prompt?")) return;
+    saveDraft({ workflow: st.workflow as Workflow, prompt, repo: st.repo });
+    location.hash = "#/new";
+  }
 
   let busy = $state(false);
   let actionError = $state<string | null>(null);
@@ -61,6 +92,20 @@
       <a class:sel={tab === "verdict"} href={`#/run/${runId}/verdict`}>Verdict{st.status === "awaiting_approval" ? " ●" : ""}</a>
     </nav>
   </div>
+
+  <details class="panel prompt" open={st.status === "failed" || st.status === "cancelled"}>
+    <summary>
+      <b>Prompt</b>
+      {#if prompt !== null}<span class="muted preview">{promptPreview}</span>{:else if promptError}<span class="error small">{promptError}</span>{/if}
+    </summary>
+    {#if prompt !== null}
+      <pre>{prompt}</pre>
+      <div class="row">
+        <button onclick={copyPrompt}>{copied ? "Copied" : "Copy"}</button>
+        <button onclick={newRunFromPrompt} title="Opens the New run form with this prompt, workflow and repository">New run from this prompt</button>
+      </div>
+    {/if}
+  </details>
 
   <ol class="phases">
     {#each phases as p (p.phase)}
@@ -138,6 +183,11 @@
   .phases li.active { border-color: var(--accent); color: white; background: var(--accent); }
   .phases li.failed { border-color: var(--bad); color: var(--bad); }
   .controls { margin-bottom: 10px; }
+  .prompt { margin: 12px 0 0; }
+  .prompt summary { cursor: pointer; display: flex; gap: 10px; align-items: baseline; min-width: 0; }
+  .prompt .preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .prompt[open] .preview { display: none; }
+  .prompt pre { white-space: pre-wrap; word-break: break-word; max-height: 40vh; overflow: auto; margin: 10px 0; font-size: 13px; }
   .note { margin: 8px 0; }
   .warn { border-color: var(--warn); }
   .panes { display: grid; gap: 12px; align-items: start; overflow-x: auto; }
