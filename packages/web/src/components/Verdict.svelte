@@ -4,6 +4,7 @@
   import { evidenceMarkdown, type RefLink, type ResolvedRef } from "@fractory/shared/refs";
   import { contextFromEvidence, linkContext, refContext } from "../lib/refctx.js";
   import Markdown from "./Markdown.svelte";
+  import PlanView from "./PlanView.svelte";
   import ReviewPanel from "./ReviewPanel.svelte";
 
   let { state: st, onAct, onRefresh, busy }: { state: RunState; onAct: (path: string, body?: unknown) => Promise<void>; onRefresh: () => Promise<void>; busy: boolean } = $props();
@@ -24,7 +25,8 @@
   const items = $derived(st.workflow === "duel" ? ((judge?.items as Item[] | undefined) ?? []) : []);
   const pending = $derived(st.status === "awaiting_approval" && st.approval?.approvedItemIds === null);
   const approved = $derived(st.approval?.approvedItemIds ?? null);
-  const result = $derived((st.result ?? {}) as { decisionMd?: string; reportMd?: string });
+  const result = $derived((st.result ?? {}) as { planMd?: string; decisionMd?: string; decisionJson?: string; reportMd?: string });
+  let tab = $state<"plan" | "decision">("plan");
 
   // Each evidence ref carries its own resolved side and commit (recorded by the orchestrator);
   // links, the file view and "Open in VS Code" use those, never just the item's better side.
@@ -55,7 +57,19 @@
 {#if st.workflow === "review"}
   <ReviewPanel state={st} {onAct} {onRefresh} {busy} />
 {:else if st.workflow === "consensus"}
-  {#if result.decisionMd}
+  {#if result.planMd && result.decisionJson}
+    <div class="row tabs">
+      <button class:primary={tab === "plan"} onclick={() => (tab = "plan")}>plan.md</button>
+      <button class:primary={tab === "decision"} onclick={() => (tab = "decision")}>decision.md</button>
+    </div>
+    <section class="panel">
+      {#if tab === "plan"}
+        <PlanView runId={st.runId} planFile={result.planMd} decisionJson={result.decisionJson} refs={refContext(st)} />
+      {:else if result.decisionMd}
+        <Markdown runId={st.runId} file={result.decisionMd} refs={refContext(st)} />
+      {/if}
+    </section>
+  {:else if result.decisionMd}
     <section class="panel"><Markdown runId={st.runId} file={result.decisionMd} refs={refContext(st)} /></section>
   {:else}
     <p class="muted">The judge has not decided yet.</p>

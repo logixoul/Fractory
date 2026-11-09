@@ -359,3 +359,13 @@ Requested: GPT-6.1 Sol + standard DeepSeek (1017) as consensus contestants with 
 - [ ] **Definitions** (approximate, from event arrival times): tool time = union of `tool_call`→`tool_result`/`tool_blocked` intervals; worker time = union of invocations (`start`→`done`/`error`); generation = worker − tool, so it includes model latency between turns and harness overhead; orchestrator = wall − worker (gates, snapshots, checks, spawn). A "round" = the tool calls of one model turn (Pi turns whose calls interleave with results would count as several).
 - [ ] **Reasoning tokens are `null` when no usage event reports them**; Claude counts thinking inside output tokens, so the Opus judge always shows output only. Tokens/s = output tokens / generation time.
 - [ ] **Shown as one line per step** in the Live panes (hover for the full breakdown and per-invocation figures, e.g. judge vs swap pass) and in `fractory show`. The live line for a running step updates when events arrive, not on a clock.
+
+## Consensus writeup step (2026-11-10)
+- **Decision ids are assigned by the orchestrator** (`d1�` in the judge's first-pass order, kept stable through the swap pass), not by the judge. Dropped decisions keep their ids so a marker pointing at one is detectable. Changing this affects decision.json/decision.md headings and the marker check.
+- **Writeup input is a scrubbed `decision.json` copy**: no `basedOn`, no side/worker names; unresolved positions are renamed `optionOne`/`optionTwo`. The judge session never sees real identities.
+- **The session resumed is the judge's first-pass session** (the swap pass runs in a fresh session).
+- **Meta-language patterns** are `consensus.metaPatterns` (regex sources, case-insensitive, word-bounded). Defaults: `proposals? [AB]`, `sides? [AB]`, `both proposals`, `the judge`, `critiques?`, `rounds?`. Plain "round"/"critique" are banned everywhere in the plan, so legitimate uses (e.g. "round-trip" is fine, "rounds" is not) need a config change.
+- **Exit check 4 validates refs against the judge worktree** (reset to the base commit); any invalid ref fails the check, not just too few.
+- **Runs with zero surviving decisions still run the writeup** (open questions only; check 1 is trivially satisfied).
+- **Sections** in the GUI are split at markdown headings; a marker belongs to the heading section containing it. Runs completed before this change have no `planMd` and keep showing decision.md only.
+- **`fractory export <run> --plan --out <path>`** copies plan.md, creating parent directories and overwriting an existing file.

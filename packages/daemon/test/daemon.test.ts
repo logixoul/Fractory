@@ -36,6 +36,10 @@ function fakeWorkers(b: Behaviour = {}) {
         id,
         new FakeWorker(id, (t: WorkerTask) => {
           const out = t.outFile ?? "";
+          if (/standalone implementation plan/.test(t.prompt)) {
+            const ids = (JSON.parse(fs.readFileSync(path.join(t.inputsDir!, "decision.json"), "utf8")) as { adoptedDecisions: { id: string }[] }).adoptedDecisions;
+            return { finalText: `# Goal\n\nDivide.\n\n${ids.map((d) => `<!-- d:${d.id} -->\nmath.js:1\n`).join("\n")}` };
+          }
           if (out.endsWith("decision.json"))
             return { structured: { summary: "s", decisions: [{ topic: "t", decision: "d", rationale: "r", basedOn: "A", evidence: ["math.js:1"] }], unresolved: [] } };
           if (out.endsWith("verdict.json"))

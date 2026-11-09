@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { Command, CommanderError } from "commander";
 import {
@@ -121,7 +122,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       .action((o: { repo: string; prompt: string }) => start(workflow, o));
 
   startCmd("review", "implement → checks → cross-family review → test confirmation → respond → rebuttal → approval → apply");
-  startCmd("consensus", "proposals → cross-critique → revisions → anonymized judge (read-only)");
+  startCmd("consensus", "proposals → cross-critique → revisions → anonymized judge → plan.md (read-only)");
   startCmd("duel", "two independent implementations → checks → judge → approval → apply (never merges or pushes)");
 
   program
@@ -162,6 +163,22 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       const run = ctx().store.open(runId);
       if (o.events) for (const e of run.events()) io.out(JSON.stringify(e) + "\n");
       else io.out(o.json ? JSON.stringify(run.state(), null, 2) + "\n" : formatShow(run.state()));
+    });
+
+  program
+    .command("export <runId>")
+    .description("export a finished run's deliverable (consensus: --plan writes plan.md)")
+    .option("--plan", "write the consensus plan.md")
+    .requiredOption("--out <path>", "destination file")
+    .action((runId: string, o: { plan?: boolean; out: string }) => {
+      if (!o.plan) throw new UserError("nothing to export: pass --plan");
+      const st = ctx().store.open(runId).state();
+      const planMd = (st.result as { planMd?: string } | undefined)?.planMd;
+      if (st.workflow !== "consensus" || !planMd) throw new UserError(`run ${runId} has no plan.md (needs a completed consensus run)`);
+      const dest = path.resolve(o.out);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(planMd, dest);
+      io.out(`plan written to ${dest}\n`);
     });
 
   program
@@ -308,8 +325,9 @@ function nextHint(st: RunState): string {
 }
 
 function resultLine(st: RunState): string {
-  const r = st.result as { decisionMd?: string; reportMd?: string; branches?: Record<string, string> } | undefined;
+  const r = st.result as { planMd?: string; decisionMd?: string; reportMd?: string; branches?: Record<string, string> } | undefined;
   const lines: string[] = [];
+  if (r?.planMd) lines.push(`plan: ${r.planMd}`);
   if (r?.decisionMd) lines.push(`decision: ${r.decisionMd}`);
   if (r?.reportMd) lines.push(`report: ${r.reportMd}`);
   if (r?.branches) lines.push(`branches (not merged or pushed): ${Object.values(r.branches).join(", ")}`);

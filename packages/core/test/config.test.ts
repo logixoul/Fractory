@@ -43,7 +43,7 @@ describe("loadConfig", () => {
     expect(config.retry).toEqual({ transientMaxRetries: 2, backoffMs: [5000, 30000], rateLimitBackoffMs: [60000, 120000] });
     expect(config.quota.warnUtilization).toBe(0.8);
     // consensus has its own lineup: GPT-6.1 Sol and the standard DeepSeek 1017 build, judged by Opus
-    expect(config.consensus).toEqual({ maxRounds: 1, minRefs: 3, contestants: ["gpt", "deepseek-std"], judge: "opus" });
+    expect(config.consensus).toMatchObject({ maxRounds: 1, minRefs: 3, contestants: ["gpt", "deepseek-std"], judge: "opus" });
     expect(config.workers["deepseek-std"]).toMatchObject({ kind: "pi", provider: "baseten", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017", thinking: "medium" });
     expect(config.prices["baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017"]).toMatchObject({ input: 0.3, output: 1.2, cacheRead: 0.007 });
     expect(config.workers.opus).toMatchObject({ kind: "claude", model: "opus", effort: "medium" });

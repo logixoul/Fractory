@@ -6,7 +6,7 @@ import { RunStore } from "../src/store/run-store.js";
 import { Redactor } from "../src/util/redact.js";
 import { FakeWorker, type FakeScript } from "../src/workers/fake.js";
 import type { WorkerTask } from "../src/workers/types.js";
-import { labelOf, testConfig, tmpDir } from "./helpers.js";
+import { fakePlan, labelOf, testConfig, tmpDir } from "./helpers.js";
 import { dataDir, g, initRepo } from "./git-helpers.js";
 
 const FILES = {
@@ -21,7 +21,7 @@ const verdict = {
   unresolved: [{ topic: "naming", positionA: "div", positionB: "divide", whyUnresolved: "style preference" }],
 };
 
-type Over = Partial<Record<"propose" | "critique" | "revise" | "judge", (t: WorkerTask, n: number) => FakeScript>>;
+type Over = Partial<Record<"propose" | "critique" | "revise" | "judge" | "writeup", (t: WorkerTask, n: number) => FakeScript>>;
 
 /** A fake contestant that behaves well unless overridden per phase. */
 function contestant(id: string, over: Over = {}, opts: { reviseNoChanges?: boolean } = {}) {
@@ -29,7 +29,9 @@ function contestant(id: string, over: Over = {}, opts: { reviseNoChanges?: boole
   return new FakeWorker(id, (task) => {
     const p = task.prompt;
     const out = task.outFile ?? "";
-    const phase = out.endsWith("decision.json") || /You are the judge/.test(p)
+    const phase = /standalone implementation plan|checks on your plan failed/.test(p)
+      ? "writeup"
+      : out.endsWith("decision.json") || /You are the judge/.test(p)
       ? "judge"
       : out.endsWith("revise.json") || /Revision round/.test(p)
         ? "revise"
@@ -50,6 +52,8 @@ function contestant(id: string, over: Over = {}, opts: { reviseNoChanges?: boole
           : { structured: { noChanges: false, proposal: "Revised: math.js:1 math.js:2 math.js:3", changeSummary: "added detail" } };
       case "judge":
         return { structured: verdict };
+      case "writeup":
+        return fakePlan(task) ?? { finalText: "" };
     }
   });
 }
@@ -78,9 +82,9 @@ describe("consensus workflow", () => {
     expect(st.status).toBe("completed");
     const lo = labelOf(st, "opus");
     const ld = labelOf(st, "deepseek");
-    const phase = (id: string) => ["setup", "propose", "critique", "revise", "judge"].indexOf(id.split(".")[0]!);
+    const phase = (id: string) => ["setup", "propose", "critique", "revise", "judge", "writeup"].indexOf(id.split(".")[0]!);
     expect(st.stepOrder.map(phase)).toEqual([...st.stepOrder.map(phase)].sort((x, y) => x - y));
-    expect(new Set(st.stepOrder)).toEqual(new Set(["setup", `propose.${lo}`, `propose.${ld}`, `critique.${lo}`, `critique.${ld}`, `revise.r1.${lo}`, `revise.r1.${ld}`, "judge"]));
+    expect(new Set(st.stepOrder)).toEqual(new Set(["setup", `propose.${lo}`, `propose.${ld}`, `critique.${lo}`, `critique.${ld}`, `revise.r1.${lo}`, `revise.r1.${ld}`, "judge", "writeup"]));
 
     // sessions are kept per contestant; prompts carry the injected project context
     expect(opus.calls.slice(1).every((c) => c.sessionId === opus.calls[0]!.sessionId || c.sessionId?.startsWith("fake-opus"))).toBe(true);
@@ -148,6 +152,44 @@ describe("consensus workflow", () => {
     expect(j.toolMs).toBeGreaterThanOrEqual(100);
     expect(j.wallMs).toBeGreaterThanOrEqual(j.workerMs);
     expect(j.workerMs).toBeGreaterThanOrEqual(j.toolMs);
+  });
+
+  it("writeup: plan.md is the deliverable, resumes the judge's session, and carries every decision marker", async () => {
+    const { data, run } = await setup();
+    const glm = contestant("glm");
+    const st = await driveRun(run, { dataDir: data, workers: { glm, opus: contestant("opus"), deepseek: contestant("deepseek") } });
+    expect(st.status).toBe("completed");
+    const plan = fs.readFileSync((st.result as { planMd: string }).planMd, "utf8");
+    expect(plan).toContain("<!-- d:d1 -->");
+    const calls = glm.calls.filter((c) => /standalone implementation plan/.test(c.prompt));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.sessionId).toBe((st.steps.judge!.result as { sessionId: string }).sessionId);
+    expect(calls[0]!.sessionId).toBeDefined();
+    const input = fs.readFileSync(path.join(calls[0]!.inputsDir!, "decision.json"), "utf8");
+    expect(input).not.toMatch(/basedOn|opus|deepseek/);
+  });
+
+  it("writeup: one repair turn fixes missing markers, unknown ids and meta-language; otherwise the step fails", async () => {
+    const bad = "# Goal\n\nAs the judge decided in round 2, see proposal A. nowhere.js:9\n<!-- d:d9 -->\n";
+    const { data, run } = await setup();
+    const fixedOnRepair = contestant("glm", {
+      writeup: (t, n) => (n === 1 ? { finalText: bad } : fakePlan({ ...t, prompt: "standalone implementation plan" })!),
+    });
+    const st = await driveRun(run, { dataDir: data, workers: { glm: fixedOnRepair, opus: contestant("opus"), deepseek: contestant("deepseek") } });
+    expect(st.status).toBe("completed");
+    const writeCalls = fixedOnRepair.calls.filter((c) => /standalone implementation plan|checks on your plan failed/.test(c.prompt));
+    expect(writeCalls).toHaveLength(2);
+    expect(writeCalls[1]!.prompt).toMatch(/no <!-- d:<id> --> marker for decision\(s\): d1/);
+    expect(writeCalls[1]!.prompt).toMatch(/d9 \(no such decision\)/);
+    expect(writeCalls[1]!.prompt).toMatch(/meta-language/);
+    expect(writeCalls[1]!.prompt).toMatch(/nowhere\.js:9/);
+
+    const again = await setup();
+    const stubborn = contestant("glm", { writeup: () => ({ finalText: bad }) });
+    const st2 = await driveRun(again.run, { dataDir: again.data, workers: { glm: stubborn, opus: contestant("opus"), deepseek: contestant("deepseek") } });
+    expect(st2.status).toBe("failed");
+    expect(st2.failure).toMatchObject({ kind: "exit_check", stepId: "writeup" });
+    expect(stubborn.calls.filter((c) => /standalone implementation plan|checks on your plan failed/.test(c.prompt))).toHaveLength(2);
   });
 
   it("stops revising early when both report noChanges", async () => {

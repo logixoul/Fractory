@@ -40,6 +40,14 @@ export function newTestRun(store: RunStore): RunHandle {
   });
 }
 
+/** Fake reply to the consensus writeup step: a plan marking every adopted decision (undefined if not a writeup prompt). */
+export function fakePlan(t: { prompt: string; inputsDir?: string }): { finalText: string } | undefined {
+  if (!/standalone implementation plan/.test(t.prompt)) return undefined;
+  const j = JSON.parse(fs.readFileSync(path.join(t.inputsDir!, "decision.json"), "utf8")) as { adoptedDecisions: { id: string; topic: string }[] };
+  const decisions = j.adoptedDecisions.map((d) => `<!-- d:${d.id} -->\nImplement ${d.topic} in math.js:3.\n`).join("\n");
+  return { finalText: `# Goal & summary\n\nAdd division.\n\n## Architecture / decisions\n\n${decisions}\n## Open questions\n\nNone.\n\nRationale and evidence: [decision.md](decision.md)\n` };
+}
+
 export function labelOf(state: RunState, workerId: string): string {
   const e = Object.entries(state.labels).find(([, w]) => w === workerId);
   if (!e) throw new Error(`no label for ${workerId}`);

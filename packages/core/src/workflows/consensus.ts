@@ -12,20 +12,22 @@ import type { RunState } from "../state/reducer.js";
 import { leakCheck, relativizePaths, scrubProse } from "../text/anonymize.js";
 import { loadProjectContext } from "../text/context.js";
 import { checkRefs } from "../text/refs.js";
+import { checkPlan } from "../text/plan.js";
 import { randomHex, seededShuffle } from "../util/random.js";
 import { copyInput, judgeScrubber, labelsOf, promptText, res, runConsensusSwapPass, sha256, writeInput, writeOut } from "./common.js";
 
 const sameLabels = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
-/** The judge's verdict after the swap pass: decisions may carry `attributionUnstable`. */
+/** The judge's verdict after the swap pass: decisions carry an orchestrator-assigned id and may carry `attributionUnstable`. */
 export type DecisionVerdict = Omit<ConsensusVerdict, "decisions"> & {
-  decisions: (ConsensusVerdict["decisions"][number] & { attributionUnstable?: boolean })[];
+  decisions: (ConsensusVerdict["decisions"][number] & { id: string; attributionUnstable?: boolean })[];
 };
 
 /**
  * Consensus workflow (spec "Workflow 1"), all phases read-only:
  *   setup → propose.<l> ∥ → critique.<l> ∥ → revise.r<n>.<l> ∥ (≤ maxRounds, early stop when
- *   both report noChanges) → judge (anonymized A/B, seeded order) → done.
+ *   both report noChanges) → judge (anonymized A/B, seeded order) → writeup (plan.md, resumes the
+ *   judge's session) → done.
  * Each contestant works in its own worktree (neutral label) at the base commit and keeps
  * one session across its steps. The workflow is a pure function of run state (rule 1).
  */
@@ -64,6 +66,15 @@ export interface JudgeResult {
   invalidEvidence: string[];
   /** No decision survived the swapped-order pass: the verdict has no decisions. */
   noRobustPreferences?: boolean;
+  /** The judge's first-pass session, resumed by the writeup step. */
+  sessionId: string;
+}
+
+export interface WriteupResult {
+  planMd: string;
+  sessionId: string;
+  /** Exit-check problems left after the repair turn (empty = passes). */
+  problems: string[];
 }
 
 export function consensusWorkflow(env: ConsensusEnv): WorkflowDef {
@@ -92,7 +103,9 @@ export function consensusWorkflow(env: ConsensusEnv): WorkflowDef {
 
       const judge = res<JudgeResult>(st, "judge");
       if (!judge) return { kind: "stage", steps: [judgeStep(env, st, setup)] };
-      return { kind: "done", result: { decisionMd: judge.decisionMd, decisionJson: judge.decisionJson, sides: judge.sides } };
+      const writeup = res<WriteupResult>(st, "writeup");
+      if (!writeup) return { kind: "stage", steps: [writeupStep(env, st, setup, judge)] };
+      return { kind: "done", result: { planMd: writeup.planMd, decisionMd: judge.decisionMd, decisionJson: judge.decisionJson, sides: judge.sides } };
     },
   };
 }
@@ -422,8 +435,8 @@ function judgeStep(env: ConsensusEnv, st: RunState, setup: SetupResult): WorkSte
           bad = invalidEvidence(r.value, cwd, roots);
         }
         if (bad.undecided.length > 0) throw new StepFailure("exit_check", `judge decisions without valid evidence: ${bad.undecided.join("; ")}`);
-        let verdict: DecisionVerdict = r.value;
-        let dropped: ConsensusVerdict["decisions"] = [];
+        let verdict: DecisionVerdict = { ...r.value, decisions: r.value.decisions.map((d, i) => ({ ...d, id: `d${i + 1}` })) };
+        let dropped: DecisionVerdict["decisions"] = [];
         if (swapped) {
           // Second pass with A/B swapped (fresh session). It checks the decision, not who gets the
           // credit: a decision survives if that pass adopts it too (any attribution). An adopted
@@ -460,7 +473,7 @@ function judgeStep(env: ConsensusEnv, st: RunState, setup: SetupResult): WorkSte
         const noRobustPreferences = !!swapped && verdict.decisions.length === 0;
         const decisionJson = writeOut(ctx, "decision.json", JSON.stringify({ verdict, sides, invalidEvidence: bad.invalid, droppedBySwapPass: dropped, noRobustPreferences }, null, 2) + "\n");
         const decisionMd = writeOut(ctx, "decision.md", renderDecision(verdict, sides, bad.invalid, dropped));
-        return { decisionJson, decisionMd, sides, scrubReplacements: replacements, invalidEvidence: bad.invalid, noRobustPreferences } satisfies JudgeResult;
+        return { decisionJson, decisionMd, sides, scrubReplacements: replacements, invalidEvidence: bad.invalid, noRobustPreferences, sessionId: r.done.sessionId } satisfies JudgeResult;
       });
     },
     exitCheck: (_ctx, r) => {
@@ -468,10 +481,98 @@ function judgeStep(env: ConsensusEnv, st: RunState, setup: SetupResult): WorkSte
       const saved = JSON.parse(fs.readFileSync(j.decisionJson, "utf8")) as { verdict: unknown; noRobustPreferences?: boolean };
       // An empty verdict is valid only as the recorded outcome of the swapped-order pass.
       // Saved decisions are the judge's plus the orchestrator's optional attributionUnstable mark.
-      const decision = ConsensusVerdict.shape.decisions.element.extend({ attributionUnstable: z.boolean().optional() });
+      const decision = ConsensusVerdict.shape.decisions.element.extend({ id: z.string().min(1), attributionUnstable: z.boolean().optional() });
       const schema = ConsensusVerdict.extend({ decisions: saved.noRobustPreferences ? z.array(decision).length(0) : z.array(decision).min(1) });
       const ok = fs.existsSync(j.decisionMd) && schema.safeParse(saved.verdict).success;
       return ok ? { ok: true } : { ok: false, reason: "decision.md/decision.json missing or invalid" };
+    },
+  };
+}
+
+const PLAN_SECTIONS = [
+  "Goal & summary",
+  "Context & constraints",
+  "Architecture / decisions",
+  "Phases (with concrete steps)",
+  "Risks & verifications",
+  "Open questions",
+];
+
+/**
+ * plan.md: the judge's session is resumed to write a standalone implementation plan from the
+ * adopted decisions. One repair turn if the machine checks fail, then the exit check fails the step.
+ */
+function writeupStep(env: ConsensusEnv, st: RunState, setup: SetupResult, judge: JudgeResult): WorkStep {
+  const judgeId = st.roles.judge;
+  const cfg0 = st.config as { consensus: { metaPatterns: string[] } };
+  const saved = JSON.parse(fs.readFileSync(judge.decisionJson, "utf8")) as {
+    verdict: DecisionVerdict;
+    droppedBySwapPass: DecisionVerdict["decisions"];
+  };
+  const adoptedIds = saved.verdict.decisions.map((d) => d.id);
+  const droppedIds = saved.droppedBySwapPass.map((d) => d.id);
+  const patterns = cfg0.consensus.metaPatterns;
+  return {
+    id: "writeup",
+    workerId: judgeId,
+    label: setup.judgeLabel,
+    async run(ctx) {
+      const cwd = setup.worktrees[setup.judgeLabel]!;
+      const taskFile = copyInput(ctx, "task.md", path.join(ctx.run.dir, "prompt.md"));
+      // Neutral wording only: no sides, no worker identities.
+      const decisionsFile = writeInput(
+        ctx,
+        "decision.json",
+        JSON.stringify(
+          {
+            summary: saved.verdict.summary,
+            adoptedDecisions: saved.verdict.decisions.map((d) => ({ id: d.id, topic: d.topic, decision: d.decision, rationale: d.rationale, evidence: d.evidence })),
+            unresolvedDisagreements: saved.verdict.unresolved.map((u) => ({ topic: u.topic, optionOne: u.positionA, optionTwo: u.positionB, whyUnresolved: u.whyUnresolved })),
+            droppedItems: saved.droppedBySwapPass.map((d) => ({ id: d.id, topic: d.topic, decision: d.decision })),
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+      const prompt = [
+        "Write a standalone implementation plan for a reader who has never seen the proposals, critiques or any discussion behind it. Read these files with your read tool:",
+        `- the task: ${taskFile}`,
+        `- the settled decisions, unresolved disagreements and dropped items: ${decisionsFile}`,
+        "",
+        "Use exactly these top-level sections, in order, as markdown headings:",
+        ...PLAN_SECTIONS.map((s, i) => `${i + 1}. ${s}`),
+        "",
+        "Rules:",
+        "- Write the plan as direct statements about the work. Never refer to proposals, sides, A/B, critiques, rounds, or a judge.",
+        "- Every adopted decision must be implemented by some section; put the invisible marker `<!-- d:<id> -->` (the decision's id, e.g. `<!-- d:d1 -->`) in each section that implements it. Use only ids of adopted decisions, never ids of dropped items, and never invent ids.",
+        "- Dropped items are not part of the plan.",
+        "- Open questions: each unresolved disagreement becomes a question with its options and their trade-offs. Do not decide them.",
+        "- Phases: concrete, ordered steps naming files, with verification for each phase.",
+        "- Cite code as `path/to/file.ext:LINE` (repo-relative, real lines at the current commit).",
+        "- End with a line linking to the audit trail: `Rationale and evidence: [decision.md](decision.md)`.",
+        "- Reply with the plan markdown only.",
+      ].join("\n");
+      return withGates(ctx, guardFor(env, st, setup, ctx), async () => {
+        const task = { cwd, mode: "read-only" as const, stepDir: ctx.stepDir, inputsDir: path.join(ctx.stepDir, "inputs"), timeoutMs: ctx.config.timeouts.judgeMs };
+        const check = (text: string) => checkPlan({ text, adoptedIds, droppedIds, metaPatterns: patterns, root: cwd, roots: [st.repo] });
+        let done = await ctx.runWorker(judgeId, { ...task, sessionId: judge.sessionId, prompt });
+        let problems = check(done.finalText);
+        if (problems.length > 0) {
+          done = await ctx.runWorker(judgeId, {
+            ...task,
+            sessionId: done.sessionId,
+            prompt: `The orchestrator's checks on your plan failed:\n${problems.map((p) => `- ${p}`).join("\n")}\nReply with the complete corrected plan markdown only.`,
+          });
+          problems = check(done.finalText);
+        }
+        const planMd = writeOut(ctx, "plan.md", done.finalText);
+        return { planMd, sessionId: done.sessionId, problems } satisfies WriteupResult;
+      });
+    },
+    exitCheck: (_ctx, r) => {
+      const w = r as WriteupResult;
+      if (!fs.readFileSync(w.planMd, "utf8").trim()) return { ok: false, reason: "plan.md is empty" };
+      return w.problems.length ? { ok: false, reason: `plan.md: ${w.problems.join("; ")}` } : { ok: true };
     },
   };
 }
@@ -487,7 +588,7 @@ function invalidEvidence(v: ConsensusVerdict, root: string, roots: string[]) {
   return { invalid, undecided };
 }
 
-export function renderDecision(v: DecisionVerdict, sides: JudgeResult["sides"], invalid: string[], dropped: ConsensusVerdict["decisions"] = []): string {
+export function renderDecision(v: DecisionVerdict, sides: JudgeResult["sides"], invalid: string[], dropped: DecisionVerdict["decisions"] = []): string {
   const side = (s: string) => (s === "A" || s === "B" ? `${s} (${sides[s].workerId})` : s);
   const out = [
     "# Decision",
@@ -502,15 +603,15 @@ export function renderDecision(v: DecisionVerdict, sides: JudgeResult["sides"], 
   if (v.decisions.length === 0) {
     out.push("No robust preferences: with A and B swapped, the judge adopted none of its first-pass decisions.", "");
   }
-  v.decisions.forEach((d, i) => {
-    out.push(`### ${i + 1}. ${d.topic}`, "", d.decision, "", `*Rationale:* ${d.rationale}`, "", `*Based on:* ${side(d.basedOn)}${d.attributionUnstable ? " (attribution unstable: with A and B swapped, the judge adopted this decision but credited it differently)" : ""}`, "", `*Evidence:* ${d.evidence.map((e) => `\`${e}\``).join(", ")}`, "");
+  v.decisions.forEach((d) => {
+    out.push(`### ${d.id}. ${d.topic}`, "", d.decision, "", `*Rationale:* ${d.rationale}`, "", `*Based on:* ${side(d.basedOn)}${d.attributionUnstable ? " (attribution unstable: with A and B swapped, the judge adopted this decision but credited it differently)" : ""}`, "", `*Evidence:* ${d.evidence.map((e) => `\`${e}\``).join(", ")}`, "");
   });
   out.push("## Unresolved disagreements", "");
   if (v.unresolved.length === 0) out.push("None.", "");
   for (const u of v.unresolved) out.push(`- **${u.topic}**: A: ${u.positionA} / B: ${u.positionB}. ${u.whyUnresolved}`);
   if (dropped.length) {
     out.push("", "## Dropped by the swapped-order pass", "", "With A and B swapped, the judge did not adopt these, so they are not decisions:", "");
-    for (const d of dropped) out.push(`- **${d.topic}**: ${d.decision}`);
+    for (const d of dropped) out.push(`- **${d.id}. ${d.topic}**: ${d.decision}`);
   }
   if (invalid.length) out.push("", `> ${invalid.length} cited reference(s) could not be validated: ${invalid.slice(0, 30).map((e) => `\`${e}\``).join(", ")}`);
   return out.join("\n") + "\n";

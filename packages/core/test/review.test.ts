@@ -1,4 +1,4 @@
-// Tests for the M0–M5 decisions review (docs/decisions-todo.md, "Review changes").
+// Tests for the M0вЂ“M5 decisions review (docs/decisions-todo.md, "Review changes").
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -15,7 +15,7 @@ import { FakeWorker, type FakeScript } from "../src/workers/fake.js";
 import { createWorkers } from "../src/workers/factory.js";
 import type { WorkerTask } from "../src/workers/types.js";
 import type { DuelSetup } from "../src/workflows/duel.js";
-import { demoWorkflow, labelOf, newTestRun, testConfig, tmpDir } from "./helpers.js";
+import { demoWorkflow, fakePlan, labelOf, newTestRun, testConfig, tmpDir } from "./helpers.js";
 import { dataDir, g, initRepo } from "./git-helpers.js";
 
 describe("1. quota text matching only on error results", () => {
@@ -256,15 +256,15 @@ describe("3. consensus judge.swapOrderPass", () => {
       ],
       unresolved: [],
     };
-    // swapped pass (A and B exchanged): "stable" A→B maps to the same contestant; "shared" both→A
-    // and "flipped" B→B map differently but are adopted; "rejected" is not adopted.
+    // swapped pass (A and B exchanged): "stable" Aв†’B maps to the same contestant; "shared" bothв†’A
+    // and "flipped" Bв†’B map differently but are adopted; "rejected" is not adopted.
     const swapVerdicts = [
       { index: 1, adopt: true, side: "B" },
       { index: 2, adopt: true, side: "A" },
       { index: 3, adopt: true, side: "B" },
       { index: 4, adopt: false, side: "B" },
     ];
-    const glm = new FakeWorker("glm", (t) => (t.outFile?.endsWith("swap.json") ? { structured: { verdicts: swapVerdicts } } : { structured: verdict }));
+    const glm = new FakeWorker("glm", (t) => fakePlan(t) ?? (t.outFile?.endsWith("swap.json") ? { structured: { verdicts: swapVerdicts } } : { structured: verdict }));
     const st = await driveRun(run, { dataDir: data, workers: { opus: contestant("opus"), deepseek: contestant("deepseek"), glm } });
     expect(st.failure).toBeUndefined();
     expect(st.status).toBe("completed");
@@ -294,7 +294,7 @@ describe("3. consensus judge.swapOrderPass", () => {
       unresolved: [],
     };
     const swapVerdicts = sides.map((side, i) => ({ index: i + 1, adopt: true, side }));
-    const glm = new FakeWorker("glm", (t) => (t.outFile?.endsWith("swap.json") ? { structured: { verdicts: swapVerdicts } } : { structured: verdict }));
+    const glm = new FakeWorker("glm", (t) => fakePlan(t) ?? (t.outFile?.endsWith("swap.json") ? { structured: { verdicts: swapVerdicts } } : { structured: verdict }));
     const st = await driveRun(run, { dataDir: data, workers: { opus: contestant("opus"), deepseek: contestant("deepseek"), glm } });
     expect(st.status).toBe("completed");
     const j = JSON.parse(fs.readFileSync((st.steps.judge!.result as { decisionJson: string }).decisionJson, "utf8"));
@@ -318,8 +318,8 @@ describe("3. consensus judge.swapOrderPass", () => {
     const verdict = { summary: "s", decisions: [{ topic: "t", decision: "d", rationale: "r", basedOn: "A", evidence: ["math.js:1"] }], unresolved: [] };
     const prompts: string[] = [];
     const glm = new FakeWorker("glm", (t) => {
-      prompts.push(t.prompt);
-      return t.outFile?.endsWith("swap.json") ? { structured: { verdicts: [{ index: 1, adopt: true, side: "B" }] } } : { structured: verdict };
+      if (!/standalone implementation plan/.test(t.prompt)) prompts.push(t.prompt);
+      return fakePlan(t) ?? (t.outFile?.endsWith("swap.json") ? { structured: { verdicts: [{ index: 1, adopt: true, side: "B" }] } } : { structured: verdict });
     });
     const st = await driveRun(run, { dataDir: data, workers: { opus: contestant("opus"), deepseek: contestant("deepseek", "added a zero guard"), glm } });
     expect(st.status).toBe("completed");
@@ -355,7 +355,7 @@ describe("3. consensus judge.swapOrderPass", () => {
       new FakeWorker(id, (t) => (t.outFile?.endsWith("revise.json") ? { structured: { noChanges: true, proposal: "", changeSummary: "" } } : { finalText: `${id} math.js:1 math.js:2 math.js:3` }));
     const verdict = { summary: "s", decisions: [{ topic: "t", decision: "d", rationale: "r", basedOn: "A", evidence: ["math.js:1"] }], unresolved: [] };
     // the swapped pass does not adopt the only decision
-    const glm = new FakeWorker("glm", (t) => (t.outFile?.endsWith("swap.json") ? { structured: { verdicts: [{ index: 1, adopt: false, side: "B" }] } } : { structured: verdict }));
+    const glm = new FakeWorker("glm", (t) => fakePlan(t) ?? (t.outFile?.endsWith("swap.json") ? { structured: { verdicts: [{ index: 1, adopt: false, side: "B" }] } } : { structured: verdict }));
     const st = await driveRun(run, { dataDir: data, workers: { opus: contestant("opus"), deepseek: contestant("deepseek"), glm } });
     expect(st.failure).toBeUndefined();
     expect(st.status).toBe("completed");

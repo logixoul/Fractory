@@ -40,6 +40,10 @@ function fakeWorkers(opts: { hangPropose?: boolean } = {}) {
     const mk = (id: string) =>
       new FakeWorker(id, (task: WorkerTask) => {
         const out = task.outFile ?? "";
+        if (/standalone implementation plan/.test(task.prompt)) {
+          const ids = (JSON.parse(fs.readFileSync(path.join(task.inputsDir!, "decision.json"), "utf8")) as { adoptedDecisions: { id: string }[] }).adoptedDecisions;
+          return { finalText: `# Goal\n\nDivide.\n\n${ids.map((d) => `<!-- d:${d.id} -->\nmath.js:1\n`).join("\n")}` };
+        }
         if (out.endsWith("decision.json")) return { structured: verdict };
         if (out.endsWith("revise.json")) return { structured: { noChanges: true, proposal: "", changeSummary: "ok" } };
         if (/Critique it/.test(task.prompt)) return { finalText: "critique" };
@@ -79,6 +83,7 @@ describe("fractory CLI", () => {
     const text = t.out.join("");
     expect(text).toMatch(/run \d{8}-\d{6}-[0-9a-f]{4} \(consensus\) created/);
     expect(text).toContain("✓ judge");
+    expect(text).toMatch(/plan: .*plan\.md/);
     expect(text).toMatch(/decision: .*decision\.md/);
     const runId = /run (\S+) \(consensus\)/.exec(text)![1]!;
 
@@ -90,6 +95,12 @@ describe("fractory CLI", () => {
     expect(await runCli(["show", runId], s.io)).toBe(0);
     expect(s.out.join("")).toContain("status    completed");
     expect(s.out.join("")).toContain("judge");
+
+    const dest = path.join(tmp(), "nested", "my-plan.md");
+    const e = io({ env: t.io.env });
+    expect(await runCli(["export", runId, "--plan", "--out", dest], e.io)).toBe(0);
+    expect(fs.readFileSync(dest, "utf8")).toContain("<!-- d:d1 -->");
+    expect(await runCli(["export", runId, "--out", dest], io({ env: t.io.env }).io)).toBe(EXIT.failed);
   });
 
   it("duel pauses for approval (exit 2), then approve + resume completes and prints the branches", async () => {

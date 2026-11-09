@@ -2,6 +2,8 @@ import { z } from "zod";
 
 const MIN = 60_000;
 
+export const DEFAULT_META_PATTERNS = ["proposals? [AB]", "sides? [AB]", "both proposals", "the judge", "critiques?", "rounds?"];
+
 export const Effort = z.enum(["low", "medium", "high", "xhigh", "max"]);
 export const Thinking = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -139,6 +141,8 @@ export const Config = z
         /** Consensus runs use their own lineup (not roles.contestants/judge, which duel uses). */
         contestants: z.tuple([z.string(), z.string()]).default(["gpt", "deepseek-std"]),
         judge: z.string().default("opus"),
+        /** Case-insensitive, word-bounded regex sources that plan.md must not contain (meta-language). */
+        metaPatterns: z.array(z.string()).default(DEFAULT_META_PATTERNS),
       })
       .prefault({}),
     duel: z
