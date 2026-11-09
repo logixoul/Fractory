@@ -68,8 +68,16 @@ export function loadConfig(opts: { repo?: string; configDir?: string; overrides?
     const r = readConfigFile(repoFile);
     if (r !== undefined) layers.push({ file: repoFile, value: r });
   }
+  for (const l of layers) {
+    const v = l.value as Record<string, unknown>;
+    if (typeof v.envFile === "string" && !path.isAbsolute(v.envFile)) {
+      l.value = { ...v, envFile: path.resolve(path.dirname(l.file), v.envFile) };
+    }
+  }
+  const ov = opts.overrides as Record<string, unknown> | undefined;
+  const overrides = ov && typeof ov.envFile === "string" && !path.isAbsolute(ov.envFile) ? { ...ov, envFile: path.resolve(ov.envFile) } : opts.overrides;
   let merged: unknown = DEFAULT_CONFIG_INPUT;
   for (const l of layers) merged = deepMerge(merged, l.value);
-  merged = deepMerge(merged, opts.overrides);
+  merged = deepMerge(merged, overrides);
   return parseConfig(merged, layers.map((l) => l.file));
 }

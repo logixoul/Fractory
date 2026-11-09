@@ -11,19 +11,22 @@ import { ensureWorktree, worktreeBranch } from "../git/worktree.js";
 import { dataPaths } from "../paths.js";
 import { DuelVerdict } from "../schemas/outputs.js";
 import type { RunState } from "../state/reducer.js";
-import { leakCheck, relativizePaths, scrubProse } from "../text/anonymize.js";
+import { leakCheck, relativizePaths } from "../text/anonymize.js";
 import { loadProjectContext } from "../text/context.js";
 import { checkRefs } from "../text/refs.js";
 import { randomHex, seededShuffle } from "../util/random.js";
-import { judgeScrubber, promptText, res, writeInput, writeOut } from "./common.js";
+import { identityTokenWarning, judgeScrubber, labelsOf, promptText, res, runSwapPass, writeInput, writeOut } from "./common.js";
 
 /**
  * Duel workflow (spec "Workflow 2"):
  *   setup (worktrees + per-repo setup) → per contestant, in parallel:
  *     implement → check.0 → [fix.1 → check.1 → … ≤ maxFixIterations, until checks pass]
- *   → judge (squashed diffs + check results, anonymized, seeded A/B) → approve (human gate)
- *   → apply (resume the apply worker's session with approved items + the other diff's excerpts)
- *   → recheck → report. Never merges or pushes; the branches are left for the user.
+ *     (an implementation without changes forfeits: no checks, no judge for it)
+ *   → judge (squashed diffs + check results, anonymized, seeded A/B; optional swapped pass)
+ *   → approve (human gate) → apply (resume the apply worker's session with approved items and
+ *   the other diff's excerpts) → recheck.0 → [refix.1 → recheck.1 → …] → report.
+ *   One forfeit: skip judge/apply, report the other branch. Both forfeit: the run fails.
+ * Never merges or pushes; the branches are left for the user.
  * Every edit step is checkpointed (§8.8) and gated (§8.2/§8.14); every check run is isolated (§8.18).
  */
 export interface DuelEnv {
@@ -72,6 +75,8 @@ export interface DuelJudgeResult {
   sides: Record<"A" | "B", { label: string; workerId: string }>;
   items: JudgeItem[];
   invalidEvidence: string[];
+  /** Items the swapped-order pass disagreed with (judge.swapOrderPass). */
+  droppedBySwapPass: JudgeItem[];
 }
 
 export interface ApplyResult extends Partial<EditResult> {
@@ -93,19 +98,45 @@ export function applyWorkerOf(st: RunState): { workerId: string; label: string }
   return { workerId, label };
 }
 
-/** Where a contestant's implement/fix chain stands. */
-export function chainOf(st: RunState, label: string, maxFix: number): { next?: string; finalCheck?: CheckStepResult; head?: EditResult; sessionId?: string } {
-  const impl = res<EditResult>(st, `implement.${label}`);
-  if (!impl) return { next: `implement.${label}` };
-  let head = impl;
+export interface Loop {
+  /** Next step of the loop, if it is not finished. */
+  next?: string;
+  finalCheck?: CheckStepResult;
+  /** Latest edit (the loop's head). */
+  head?: EditResult;
+  sessionId?: string;
+  fixes: number;
+}
+
+/** A check → fix loop after an edit step: check.0 → [fix.1 → check.1 → …] until pass or maxFix. */
+function checkFixLoop(st: RunState, first: EditResult, ids: { check: (i: number) => string; fix: (i: number) => string }, maxFix: number): Loop {
+  let head = first;
   for (let i = 0; ; i++) {
-    const chk = res<CheckStepResult>(st, `check.${i}.${label}`);
-    if (!chk) return { next: `check.${i}.${label}`, head, sessionId: head.sessionId };
-    if (chk.allPassed || i >= maxFix) return { finalCheck: chk, head, sessionId: head.sessionId };
-    const fix = res<EditResult>(st, `fix.${i + 1}.${label}`);
-    if (!fix) return { next: `fix.${i + 1}.${label}`, head, sessionId: head.sessionId };
+    const chk = res<CheckStepResult>(st, ids.check(i));
+    if (!chk) return { next: ids.check(i), head, sessionId: head.sessionId, fixes: i };
+    if (chk.allPassed || i >= maxFix) return { finalCheck: chk, head, sessionId: head.sessionId, fixes: i };
+    const fix = res<EditResult>(st, ids.fix(i + 1));
+    if (!fix) return { next: ids.fix(i + 1), head, sessionId: head.sessionId, fixes: i };
     head = fix;
   }
+}
+
+export interface Chain extends Loop {
+  forfeited: boolean;
+}
+
+/** Where a contestant's implement → check/fix chain stands. */
+export function chainOf(st: RunState, label: string, maxFix: number): Chain {
+  const impl = res<EditResult>(st, `implement.${label}`);
+  if (!impl) return { next: `implement.${label}`, forfeited: false, fixes: 0 };
+  if (impl.changedFiles.length === 0) return { head: impl, sessionId: impl.sessionId, forfeited: true, fixes: 0 };
+  return { ...checkFixLoop(st, impl, { check: (i) => `check.${i}.${label}`, fix: (i) => `fix.${i}.${label}` }, maxFix), forfeited: false };
+}
+
+/** The post-apply check → fix loop (recheck.0 → [refix.1 → recheck.1 → …]). */
+export function applyLoopOf(st: RunState, apply: ApplyResult, maxFix: number): Loop | undefined {
+  if (apply.skipped) return undefined;
+  return checkFixLoop(st, apply as EditResult, { check: (i) => `recheck.${i}`, fix: (i) => `refix.${i}` }, maxFix);
 }
 
 export function duelWorkflow(env: DuelEnv): WorkflowDef {
@@ -124,22 +155,42 @@ export function duelWorkflow(env: DuelEnv): WorkflowDef {
         return { kind: "stage", steps };
       }
 
-      const judge = res<DuelJudgeResult>(st, "judge");
-      if (!judge) return { kind: "stage", steps: [judgeStep(env, st, setup, maxFix)] };
-
-      const approval = res<{ approvedItemIds: number[] }>(st, "approve");
-      if (!approval) {
-        const gate: ApprovalGate = { kind: "approval_gate", id: "approve", items: (s) => res<DuelJudgeResult>(s, "judge")!.items };
-        return { kind: "stage", steps: [gate] };
+      const forfeited = chains.filter((c) => c.forfeited).map((c) => c.label);
+      if (forfeited.length === labels.length) {
+        // Both forfeit: a machine-checked dead end (rule 6), recorded as a failing step.
+        return { kind: "stage", steps: [bothForfeitStep(st)] };
       }
-      const apply = res<ApplyResult>(st, "apply");
-      if (!apply) return { kind: "stage", steps: [applyStep(env, st, setup, judge, approval.approvedItemIds, maxFix)] };
-      const recheck = res<CheckStepResult | { skipped: true }>(st, "recheck");
-      if (!recheck) return { kind: "stage", steps: [recheckStep(env, st, setup, apply)] };
+      if (forfeited.length === 0) {
+        const judge = res<DuelJudgeResult>(st, "judge");
+        if (!judge) return { kind: "stage", steps: [judgeStep(env, st, setup, maxFix)] };
+        const approval = res<{ approvedItemIds: number[] }>(st, "approve");
+        if (!approval) {
+          const gate: ApprovalGate = { kind: "approval_gate", id: "approve", items: (s) => res<DuelJudgeResult>(s, "judge")!.items };
+          return { kind: "stage", steps: [gate] };
+        }
+        const apply = res<ApplyResult>(st, "apply");
+        if (!apply) return { kind: "stage", steps: [applyStep(env, st, setup, judge, approval.approvedItemIds, maxFix)] };
+        const loop = applyLoopOf(st, apply, maxFix);
+        if (loop?.next) return { kind: "stage", steps: [applyLoopStep(env, st, setup, loop)] };
+      }
       const report = res<{ reportMd: string }>(st, "report");
-      if (!report) return { kind: "stage", steps: [reportStep(st, setup, judge, apply, recheck, maxFix)] };
-      return { kind: "done", result: { reportMd: report.reportMd, branches: setup.branches } };
+      if (!report) return { kind: "stage", steps: [reportStep(st, setup, maxFix)] };
+      const winner = forfeited.length === 1 ? labels.find((l) => !forfeited.includes(l)) : undefined;
+      return {
+        kind: "done",
+        result: { reportMd: report.reportMd, branches: setup.branches, forfeited, ...(winner ? { winner: { label: winner, workerId: st.labels[winner], branch: setup.branches[winner] } } : {}) },
+      };
     },
+  };
+}
+
+function bothForfeitStep(st: RunState): WorkStep {
+  return {
+    id: "outcome",
+    async run() {
+      return { forfeited: Object.keys(st.labels).sort() };
+    },
+    exitCheck: () => ({ ok: false, reason: "both contestants forfeited: neither implementation changed any file" }),
   };
 }
 
@@ -237,6 +288,31 @@ async function editTurn(
 const noShell = (checkNames: string[]) =>
   `You have no shell. The orchestrator runs the project's checks after you finish${checkNames.length ? ` (${checkNames.join(", ")})` : ""} and reports failures back to you.`;
 
+/** A fix turn: resume the session with the failed check output as an input file. */
+function fixStep(env: DuelEnv, st: RunState, setup: DuelSetup, o: { id: string; label: string; failed: CheckStepResult; iteration: number; sessionId: string; siblingWritable: string[] }): WorkStep {
+  const workerId = st.labels[o.label]!;
+  const maxFix = configOf(st).duel.maxFixIterations;
+  return {
+    id: o.id,
+    workerId,
+    label: o.label,
+    async run(ctx) {
+      const roots = [...Object.values(setup.worktrees), env.dataDir];
+      const report = o.failed.failures
+        .map((f) => `## ${f.name} (exit ${f.code ?? "none"}, ${f.reason})\n\n\`${JSON.stringify(f.argv)}\`\n\n\`\`\`\n${relativizePaths(f.logTail, roots)}\n\`\`\``)
+        .join("\n\n");
+      const file = writeInput(ctx, "check-failures.md", `# Failed checks (fix iteration ${o.iteration} of ${maxFix})\n\n${report}\n`);
+      const prompt = [
+        `The orchestrator ran the project's checks on your changes and some failed. The output is in this file (read it with your read tool): ${file}`,
+        "Fix the code in this worktree so the checks pass, without weakening or deleting the checks themselves.",
+        noShell(ctx.config.checks.map((c) => c.name)),
+        "Reply with a short summary of the fix.",
+      ].join("\n\n");
+      return editTurn(ctx, env, st, setup, { label: o.label, workerId, prompt, sessionId: o.sessionId, siblingWritable: o.siblingWritable });
+    },
+  };
+}
+
 function chainStep(env: DuelEnv, st: RunState, setup: DuelSetup, label: string, stepId: string, labels: string[], parallel: boolean): WorkStep {
   const workerId = st.labels[label]!;
   const sibling = parallel ? labels.filter((l) => l !== label) : [];
@@ -261,37 +337,30 @@ function chainStep(env: DuelEnv, st: RunState, setup: DuelSetup, label: string, 
           .join("\n\n");
         return editTurn(ctx, env, st, setup, { label, workerId, prompt, siblingWritable: sibling });
       },
-      exitCheck: (_ctx, r) =>
-        (r as EditResult).changedFiles.length > 0 ? { ok: true } : { ok: false, reason: "the implementation changed no files relative to the base commit" },
+      // No exit check: an implementation without changes is a forfeit (handled by the workflow).
     };
   }
-
   if (kind === "fix") {
     const i = Number(stepId.split(".")[1]);
-    const failed = res<CheckStepResult>(st, `check.${i - 1}.${label}`)!;
-    return {
+    return fixStep(env, st, setup, {
       id: stepId,
-      workerId,
       label,
-      async run(ctx) {
-        const roots = [...Object.values(setup.worktrees), env.dataDir];
-        const report = failed.failures
-          .map((f) => `## ${f.name} (exit ${f.code ?? "none"}, ${f.reason})\n\n\`${JSON.stringify(f.argv)}\`\n\n\`\`\`\n${relativizePaths(f.logTail, roots)}\n\`\`\``)
-          .join("\n\n");
-        const file = writeInput(ctx, "check-failures.md", `# Failed checks (fix iteration ${i} of ${maxFix})\n\n${report}\n`);
-        const prompt = [
-          `The orchestrator ran the project's checks on your changes and some failed. The output is in this file (read it with your read tool): ${file}`,
-          "Fix the code in this worktree so the checks pass, without weakening or deleting the checks themselves.",
-          noShell(ctx.config.checks.map((c) => c.name)),
-          "Reply with a short summary of the fix.",
-        ].join("\n\n");
-        return editTurn(ctx, env, st, setup, { label, workerId, prompt, sessionId: chain.sessionId!, siblingWritable: sibling });
-      },
-    };
+      failed: res<CheckStepResult>(st, `check.${i - 1}.${label}`)!,
+      iteration: i,
+      sessionId: chain.sessionId!,
+      siblingWritable: sibling,
+    });
   }
-
-  // check.<i>.<label>
   return checkStep(env, st, setup, label, stepId, chain.head!.head);
+}
+
+/** The next step of the post-apply loop: a recheck, or a refix resuming the apply session. */
+function applyLoopStep(env: DuelEnv, st: RunState, setup: DuelSetup, loop: Loop): WorkStep {
+  const { label } = applyWorkerOf(st);
+  const id = loop.next!;
+  if (id.startsWith("recheck.")) return checkStep(env, st, setup, label, id, loop.head!.head);
+  const i = Number(id.split(".")[1]);
+  return fixStep(env, st, setup, { id, label, failed: res<CheckStepResult>(st, `recheck.${i - 1}`)!, iteration: i, sessionId: loop.sessionId!, siblingWritable: [] });
 }
 
 function checkStep(env: DuelEnv, st: RunState, setup: DuelSetup, label: string, stepId: string, sha: string): WorkStep {
@@ -341,12 +410,6 @@ function checksMarkdown(c: CheckStepResult | undefined, fixes: number, roots: st
   return lines.join("\n") + "\n";
 }
 
-function fixesUsed(st: RunState, label: string): number {
-  let n = 0;
-  while (res(st, `fix.${n + 1}.${label}`)) n++;
-  return n;
-}
-
 function judgeStep(env: DuelEnv, st: RunState, setup: DuelSetup, maxFix: number): WorkStep {
   const judgeId = st.roles.judge;
   return {
@@ -354,46 +417,54 @@ function judgeStep(env: DuelEnv, st: RunState, setup: DuelSetup, maxFix: number)
     workerId: judgeId,
     label: setup.judgeLabel,
     async run(ctx) {
+      const cfg = ctx.config;
       const labels = Object.keys(st.labels).sort();
       const [la, lb] = seededShuffle(labels, st.seed) as [string, string];
       const sides = { A: { label: la, workerId: st.labels[la]! }, B: { label: lb, workerId: st.labels[lb]! } };
       const roots = [...Object.values(setup.worktrees), st.repo, env.dataDir];
       const scrubber = judgeScrubber(ctx, st);
-      const chainA = chainOf(st, la, maxFix);
-      const chainB = chainOf(st, lb, maxFix);
+      const chains = { [la]: chainOf(st, la, maxFix), [lb]: chainOf(st, lb, maxFix) };
 
       // Diffs are passed verbatim (code is never rewritten, §8.16); paths in git diffs are repo-relative.
-      const diffA = await squashedDiff(setup.worktrees[la]!, setup.base, chainA.head!.head);
-      const diffB = await squashedDiff(setup.worktrees[lb]!, setup.base, chainB.head!.head);
-      const task = scrubProse(relativizePaths(promptText(ctx.run.dir), roots), scrubber).text;
-      const files = {
-        task: writeInput(ctx, "task.md", task),
-        diffA: writeInput(ctx, "diff-A.patch", diffA),
-        diffB: writeInput(ctx, "diff-B.patch", diffB),
-        checksA: writeInput(ctx, "checks-A.md", checksMarkdown(chainA.finalCheck, fixesUsed(st, la), roots)),
-        checksB: writeInput(ctx, "checks-B.md", checksMarkdown(chainB.finalCheck, fixesUsed(st, lb), roots)),
+      const diffs = {
+        [la]: await squashedDiff(setup.worktrees[la]!, setup.base, chains[la]!.head!.head),
+        [lb]: await squashedDiff(setup.worktrees[lb]!, setup.base, chains[lb]!.head!.head),
       };
-      // Prose (task) gets the full leak check; tool output only the path check.
+      // The user's own task text is exempt from scrub and leak check.
+      const taskFile = writeInput(ctx, "task.md", promptText(ctx.run.dir));
+      const sideFiles = (prefix: string, a: string, b: string) => ({
+        diffA: writeInput(ctx, `${prefix}diff-A.patch`, diffs[a]!),
+        diffB: writeInput(ctx, `${prefix}diff-B.patch`, diffs[b]!),
+        checksA: writeInput(ctx, `${prefix}checks-A.md`, checksMarkdown(chains[a]!.finalCheck, chains[a]!.fixes, roots)),
+        checksB: writeInput(ctx, `${prefix}checks-B.md`, checksMarkdown(chains[b]!.finalCheck, chains[b]!.fixes, roots)),
+      });
+      const files = sideFiles("", la, lb);
+      // Swap pass inputs must exist before the step's inputs/ baseline is taken (§8.19).
+      const swapped = cfg.judge.swapOrderPass ? sideFiles("swap/", lb, la) : undefined;
+      // Tool output (check logs) gets the path leak check only.
       const forbidden = [env.dataDir, ...Object.values(setup.worktrees)];
-      const leaks = [
-        ...leakCheck(fs.readFileSync(files.task, "utf8"), scrubber, forbidden),
-        ...[files.checksA, files.checksB].flatMap((f) => leakCheck(fs.readFileSync(f, "utf8"), { patterns: [], replacement: "" }, forbidden)),
-      ];
+      const leaks = [files.checksA, files.checksB].flatMap((f) => leakCheck(fs.readFileSync(f, "utf8"), { patterns: [], replacement: "" }, forbidden));
       if (leaks.length > 0) throw new StepFailure("integrity", `anonymization leak check failed for judge inputs (${leaks.length} hit(s))`);
+      // Code in diffs is never rewritten; identity tokens in it only produce a warning.
+      identityTokenWarning(ctx, scrubber, { "diff-A.patch": diffs[la]!, "diff-B.patch": diffs[lb]! });
 
+      const fileList = (f: ReturnType<typeof sideFiles>) =>
+        [
+          `- task: ${taskFile}`,
+          `- diff of A against the base commit: ${f.diffA}`,
+          `- diff of B against the base commit: ${f.diffB}`,
+          `- check results of A: ${f.checksA}`,
+          `- check results of B: ${f.checksB}`,
+        ].join("\n");
       const cwd = setup.worktrees[setup.judgeLabel]!;
       const prompt = [
         "You are the judge. Two anonymous engineers, A and B, independently implemented the task below. Read these files with your read tool:",
-        `- task: ${files.task}`,
-        `- diff of A against the base commit: ${files.diffA}`,
-        `- diff of B against the base commit: ${files.diffB}`,
-        `- check results of A: ${files.checksA}`,
-        `- check results of B: ${files.checksB}`,
+        fileList(files),
         "",
         "Your working directory holds the base commit (read-only), for context. The order of A and B is random and carries no meaning.",
         "Compare the implementations aspect by aspect (correctness, completeness, tests, design, risk). For each aspect give the better side, path:line evidence (repo-relative, as the file is in that side's version or in the base), a concrete recommendation for the final implementation, and the risk of adopting it.",
       ].join("\n");
-      const taskOpts = { cwd, mode: "read-only" as const, stepDir: ctx.stepDir, inputsDir: path.join(ctx.stepDir, "inputs"), timeoutMs: ctx.config.timeouts.judgeMs };
+      const taskOpts = { cwd, mode: "read-only" as const, stepDir: ctx.stepDir, inputsDir: path.join(ctx.stepDir, "inputs"), timeoutMs: cfg.timeouts.judgeMs };
       const evidenceRoots = [setup.worktrees[la]!, setup.worktrees[lb]!];
 
       return withGates(
@@ -402,7 +473,7 @@ function judgeStep(env: DuelEnv, st: RunState, setup: DuelSetup, maxFix: number)
           targets: { mainRepo: st.repo, worktrees: setup.worktrees },
           guard: guardCtx(env, st),
           restoreTo: await headsOf(setup.worktrees),
-          preserveOnClean: ctx.config.preserveOnClean,
+          preserveOnClean: cfg.preserveOnClean,
           inputsDir: taskOpts.inputsDir,
         },
         async () => {
@@ -422,13 +493,26 @@ function judgeStep(env: DuelEnv, st: RunState, setup: DuelSetup, maxFix: number)
             bad = duelEvidence(r.value, cwd, evidenceRoots);
           }
           if (bad.unsupported.length > 0) throw new StepFailure("exit_check", `judge items without valid evidence: ${bad.unsupported.join("; ")}`);
-          const items: JudgeItem[] = r.value.items.map((it) => ({
-            ...it,
-            betterLabel: sides[it.betterSide].label,
-            betterWorker: sides[it.betterSide].workerId,
-          }));
-          const verdictFile = writeOut(ctx, "verdict.json", JSON.stringify({ verdict: r.value, sides, invalidEvidence: bad.invalid }, null, 2) + "\n");
-          return { verdictFile, summary: r.value.summary, sides, items, invalidEvidence: bad.invalid } satisfies DuelJudgeResult;
+          let items: JudgeItem[] = r.value.items.map((it) => ({ ...it, betterLabel: sides[it.betterSide].label, betterWorker: sides[it.betterSide].workerId }));
+          let dropped: JudgeItem[] = [];
+          if (swapped) {
+            const ratings = await runSwapPass(ctx, {
+              judgeId,
+              cwd,
+              timeoutMs: cfg.timeouts.judgeMs,
+              fileList: fileList(swapped),
+              points: items.map((it, i) => ({ index: i + 1, text: `${it.aspect}: ${it.recommendation}` })),
+            });
+            const agreed = items.filter((it, i) => {
+              const second = ratings.get(i + 1);
+              return second !== undefined && labelsOf(second, lb, la).join() === it.betterLabel;
+            });
+            dropped = items.filter((it) => !agreed.includes(it));
+            if (agreed.length === 0) throw new StepFailure("exit_check", "the swapped-order judge pass agreed with none of the items");
+            items = agreed;
+          }
+          const verdictFile = writeOut(ctx, "verdict.json", JSON.stringify({ verdict: r.value, sides, items, invalidEvidence: bad.invalid, droppedBySwapPass: dropped }, null, 2) + "\n");
+          return { verdictFile, summary: r.value.summary, sides, items, invalidEvidence: bad.invalid, droppedBySwapPass: dropped } satisfies DuelJudgeResult;
         },
       );
     },
@@ -499,41 +583,49 @@ function applyStep(env: DuelEnv, st: RunState, setup: DuelSetup, judge: DuelJudg
   };
 }
 
-function recheckStep(env: DuelEnv, st: RunState, setup: DuelSetup, apply: ApplyResult): WorkStep {
-  const { label } = applyWorkerOf(st);
-  return {
-    id: "recheck",
-    label,
-    async run(ctx) {
-      if (apply.skipped) return { skipped: true };
-      return runChecksFor(ctx, env, st, setup.worktrees[label]!, apply.head);
-    },
-  };
-}
-
-function reportStep(st: RunState, setup: DuelSetup, judge: DuelJudgeResult, apply: ApplyResult, recheck: CheckStepResult | { skipped: true }, maxFix: number): WorkStep {
+function reportStep(st: RunState, setup: DuelSetup, maxFix: number): WorkStep {
   return {
     id: "report",
     async run(ctx) {
-      const { workerId, label } = applyWorkerOf(st);
+      const labels = Object.keys(st.labels).sort();
+      const judge = res<DuelJudgeResult>(st, "judge");
+      const apply = res<ApplyResult>(st, "apply");
       const lines = [`# Duel report: ${st.runId}`, "", `Base commit: \`${setup.base}\``, "", "## Branches (never merged or pushed)", ""];
-      for (const l of Object.keys(st.labels).sort()) {
+      for (const l of labels) {
         const c = chainOf(st, l, maxFix);
+        if (c.forfeited) {
+          lines.push(`- \`${setup.branches[l]}\` (${st.labels[l]}): **forfeited**, the implementation changed no files`);
+          continue;
+        }
         const checks = c.finalCheck?.results.length ? (c.finalCheck.allPassed ? "checks pass" : "checks FAIL") : "no checks";
-        lines.push(`- \`${setup.branches[l]}\` (${st.labels[l]}): head \`${c.head!.head.slice(0, 10)}\`, ${c.head!.changedFiles.length} file(s) changed, ${fixesUsed(st, l)} fix iteration(s), ${checks}`);
+        lines.push(`- \`${setup.branches[l]}\` (${st.labels[l]}): head \`${c.head!.head.slice(0, 10)}\`, ${c.head!.changedFiles.length} file(s) changed, ${c.fixes} fix iteration(s), ${checks}`);
       }
-      lines.push("", "## Judge", "", judge.summary, "", `Sides: A = ${judge.sides.A.workerId}, B = ${judge.sides.B.workerId}.`, "");
-      judge.items.forEach((it, i) => {
-        const mark = apply.approvedItemIds.includes(i + 1) ? "[x]" : "[ ]";
-        lines.push(`${mark} **${i + 1}. ${it.aspect}**: better ${it.betterSide} (${it.betterWorker}). ${it.recommendation} *Risk:* ${it.risk || "none stated"}. Evidence: ${it.evidence.map((e) => `\`${e}\``).join(", ")}`);
-      });
-      lines.push("", "## Apply", "");
-      if (apply.skipped) lines.push("No items approved; nothing applied.");
-      else {
-        lines.push(`${workerId} applied items ${apply.approvedItemIds.join(", ")} on \`${setup.branches[label]}\` → \`${apply.head.slice(0, 10)}\`.`, "");
-        lines.push(fs.readFileSync(apply.summaryFile!, "utf8").trim());
-        const rc = recheck as CheckStepResult;
-        lines.push("", "### Recheck", "", rc.results.length ? rc.results.map((r) => `- ${r.name}: ${r.passed ? "pass" : "FAIL"}`).join("\n") : "No checks configured.");
+      const forfeited = labels.filter((l) => chainOf(st, l, maxFix).forfeited);
+      if (forfeited.length === 1) {
+        const w = labels.find((l) => !forfeited.includes(l))!;
+        lines.push("", "## Result", "", `${st.labels[forfeited[0]!]} forfeited, so there was no judge or apply step. The result is \`${setup.branches[w]}\` (${st.labels[w]}).`);
+      }
+      if (judge) {
+        lines.push("", "## Judge", "", judge.summary, "", `Sides: A = ${judge.sides.A.workerId}, B = ${judge.sides.B.workerId}.`, "");
+        judge.items.forEach((it, i) => {
+          const mark = apply?.approvedItemIds.includes(i + 1) ? "[x]" : "[ ]";
+          lines.push(`${mark} **${i + 1}. ${it.aspect}**: better ${it.betterSide} (${it.betterWorker}). ${it.recommendation} *Risk:* ${it.risk || "none stated"}. Evidence: ${it.evidence.map((e) => `\`${e}\``).join(", ")}`);
+        });
+        if (judge.droppedBySwapPass.length) {
+          lines.push("", "Dropped by the swapped-order pass:", ...judge.droppedBySwapPass.map((it) => `- ${it.aspect}: ${it.recommendation}`));
+        }
+      }
+      if (apply) {
+        const { workerId, label } = applyWorkerOf(st);
+        lines.push("", "## Apply", "");
+        if (apply.skipped) lines.push("No items approved; nothing applied.");
+        else {
+          const loop = applyLoopOf(st, apply, maxFix)!;
+          lines.push(`${workerId} applied items ${apply.approvedItemIds.join(", ")} on \`${setup.branches[label]}\` → \`${loop.head!.head.slice(0, 10)}\` (${loop.fixes} fix iteration(s) after apply).`, "");
+          lines.push(fs.readFileSync(apply.summaryFile!, "utf8").trim());
+          const rc = loop.finalCheck!;
+          lines.push("", "### Checks after apply", "", rc.results.length ? rc.results.map((r) => `- ${r.name}: ${r.passed ? "pass" : "FAIL"}`).join("\n") : "No checks configured.");
+        }
       }
       lines.push("", "Inspect: `git log` / `git diff` on the branches above, in your repository. fractory never merges or pushes.");
       return { reportMd: writeOut(ctx, "report.md", lines.join("\n") + "\n") };

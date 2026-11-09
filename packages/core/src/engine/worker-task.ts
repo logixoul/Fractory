@@ -81,7 +81,9 @@ export async function runWorkerTask(args: {
       switch (ev.type) {
         case "usage": {
           const priceKey = `${ev.provider}/${ev.model}`;
-          const cost = computeCost(cfg.prices[priceKey], ev.tokens);
+          // Claude runs on the Pro subscription: not metered; its vendor cost is API-equivalent only.
+          const subscription = cfg.workers[workerId]?.kind === "claude";
+          const cost = subscription ? { costUsd: 0 } : computeCost(cfg.prices[priceKey], ev.tokens);
           run.append({
             type: "usage_recorded",
             stepId,
@@ -91,7 +93,8 @@ export async function runWorkerTask(args: {
             tokens: ev.tokens,
             costUsd: cost.costUsd,
             ...(ev.vendorCostUsd !== undefined ? { vendorCostUsd: ev.vendorCostUsd } : {}),
-            ...(cost.warning !== undefined ? { warning: cost.warning } : {}),
+            ...("warning" in cost && cost.warning !== undefined ? { warning: cost.warning } : {}),
+            billing: subscription ? "subscription" : "metered",
           });
           break;
         }
@@ -123,7 +126,10 @@ export async function runWorkerTask(args: {
   if (error?.kind === "quota" || (exhausted && !done)) {
     throw new QuotaExhaustedError(workerId, error?.resetsAt ?? lastResetsAt);
   }
-  if (error) throw new StepFailure(error.kind === "timeout" ? "timeout" : "error", `${workerId}: ${error.kind}: ${error.message}`);
+  if (error) {
+    const kind = error.kind === "timeout" ? "timeout" : error.kind === "transient" ? "transient" : "error";
+    throw new StepFailure(kind, `${workerId}: ${error.kind}: ${error.message}`);
+  }
   if (!done) throw new StepFailure("error", `worker ${workerId} ended without a done event`);
   return done;
 }

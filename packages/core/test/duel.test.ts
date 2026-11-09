@@ -42,6 +42,12 @@ function worker(id: string, h: Partial<Record<Phase, Handler>>) {
 
 const write = (content: string, extra: object = {}): FakeScript => ({ actions: [{ writeFile: { path: "math.js", content } }], finalText: "done", ...extra });
 
+/** The default judge is a third, non-contestant worker. */
+const judgeWorker = (swap?: { index: number; side: string }[]) =>
+  new FakeWorker("glm", (t) =>
+    t.outFile?.endsWith("swap.json") ? { structured: { verdicts: swap ?? [] } } : { structured: verdict },
+  );
+
 const verdict = {
   summary: "Both work; take the guard from one side.",
   items: [
@@ -57,7 +63,7 @@ async function setup(cfgOver: object = {}) {
   const prompt = path.join(tmpDir(), "prompt.md");
   fs.writeFileSync(prompt, "Add a div function to math.js. (Claude: be careful.)\n");
   const config = testConfig({
-    workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" } },
+    workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } },
     checks: [{ name: "test", argv: [process.execPath, "check.cjs"] }],
     ...cfgOver,
   });
@@ -75,9 +81,9 @@ describe("duel workflow", () => {
     const deepseek = worker("deepseek", {
       implement: () => write(FILES["math.js"] + "export const mul = (a, b) => a * b;\n"),
       fix: () => write(FILES["math.js"] + "export const div = (a, b) => (b === 0 ? NaN : a / b);\n"),
-      judge: () => ({ structured: verdict }),
     });
-    const workers = { opus, deepseek };
+    const glm = judgeWorker();
+    const workers = { opus, deepseek, glm };
     let st = await driveRun(run, { dataDir: data, workers });
     expect(st.status).toBe("awaiting_approval");
     const lo = labelOf(st, "opus");
@@ -99,13 +105,16 @@ describe("duel workflow", () => {
     expect(log).toContain(`fractory|fractory: fix.1.${ld} result`);
     expect(log).not.toMatch(/opus|deepseek/);
 
-    // judge saw squashed diffs verbatim (code not scrubbed) and a scrubbed task
-    const judgeCall = deepseek.calls.find((c) => phaseOf(c) === "judge")!;
+    // judge (a third worker) saw squashed diffs verbatim (code not scrubbed) and the task verbatim
+    expect(deepseek.calls.some((c) => phaseOf(c) === "judge")).toBe(false);
+    const judgeCall = glm.calls.find((c) => phaseOf(c) === "judge")!;
     const inDir = judgeCall.inputsDir!;
     const diffs = fs.readFileSync(path.join(inDir, "diff-A.patch"), "utf8") + fs.readFileSync(path.join(inDir, "diff-B.patch"), "utf8");
     expect(diffs).toContain("// Written by Claude");
     expect(diffs).not.toContain("checkpoint");
-    expect(fs.readFileSync(path.join(inDir, "task.md"), "utf8")).toContain("([agent]: be careful.)");
+    expect(fs.readFileSync(path.join(inDir, "task.md"), "utf8")).toContain("(Claude: be careful.)");
+    // identity tokens in code are only a warning
+    expect(st.warnings).toEqual([expect.objectContaining({ code: "identity_in_diff", stepId: "judge" })]);
     expect(fs.readdirSync(inDir).sort()).toEqual(["checks-A.md", "checks-B.md", "diff-A.patch", "diff-B.patch", "task.md"]);
 
     // approval items carry the real side; approve item 1 and resume
@@ -121,7 +130,7 @@ describe("duel workflow", () => {
     expect(applyCall.mode).toBe("edit");
     expect(fs.readFileSync(path.join(applyCall.inputsDir!, "approved-items.md"), "utf8")).toContain("guard against b === 0");
     expect(fs.readFileSync(path.join(applyCall.inputsDir!, "other-diff.patch"), "utf8")).toContain("diff --git a/math.js");
-    expect((st.steps.recheck!.result as { allPassed: boolean }).allPassed).toBe(true);
+    expect((st.steps["recheck.0"]!.result as { allPassed: boolean }).allPassed).toBe(true);
     const report = fs.readFileSync((st.result as { reportMd: string }).reportMd, "utf8");
     expect(report).toContain("[x] **1. division guard**");
     expect(report).toContain("[ ] **2. naming**");
@@ -139,31 +148,91 @@ describe("duel workflow", () => {
     const deepseek = worker("deepseek", {
       implement: () => write("export const nope = 1;\n"),
       fix: (_t, n) => write(`export const nope = ${n + 1};\n`),
-      judge: () => ({ structured: verdict }),
     });
-    let st = await driveRun(run, { dataDir: data, workers: { opus, deepseek } });
+    const glm = judgeWorker();
+    let st = await driveRun(run, { dataDir: data, workers: { opus, deepseek, glm } });
     const ld = labelOf(st, "deepseek");
     expect(st.status).toBe("awaiting_approval");
     expect(st.stepOrder.filter((s) => s.endsWith(`.${ld}`) && s.startsWith("fix."))).toEqual([`fix.1.${ld}`, `fix.2.${ld}`]);
     expect(st.steps[`check.3.${ld}`]).toBeUndefined();
-    expect(fs.readFileSync(path.join(deepseek.calls.find((c) => phaseOf(c) === "judge")!.inputsDir!, "checks-A.md"), "utf8")).toMatch(/pass|FAIL/);
+    expect(fs.readFileSync(path.join(glm.calls.find((c) => phaseOf(c) === "judge")!.inputsDir!, "checks-A.md"), "utf8")).toMatch(/pass|FAIL/);
 
     approveRun(store.open(run.runId), []);
-    st = await driveRun(store.open(run.runId), { dataDir: data, workers: { opus, deepseek } });
+    st = await driveRun(store.open(run.runId), { dataDir: data, workers: { opus, deepseek, glm } });
     expect(st.status).toBe("completed");
     expect(st.steps.apply!.result).toMatchObject({ skipped: true });
-    expect(st.steps.recheck!.result).toEqual({ skipped: true });
+    expect(st.steps["recheck.0"]).toBeUndefined();
     expect(opus.calls.some((c) => phaseOf(c) === "apply")).toBe(false);
   });
 
-  it("an implementation without changes fails its exit check", async () => {
+  it("an implementation without changes forfeits: no judge, the other branch is the result", async () => {
     const { data, run } = await setup();
+    const glm = judgeWorker();
     const st = await driveRun(run, {
       dataDir: data,
-      workers: { opus: worker("opus", { implement: () => ({ finalText: "nothing to do" }) }), deepseek: worker("deepseek", { implement: () => write(WITH_DIV) }) },
+      workers: { opus: worker("opus", { implement: () => ({ finalText: "nothing to do" }) }), deepseek: worker("deepseek", { implement: () => write(WITH_DIV) }), glm },
     });
+    expect(st.status).toBe("completed");
+    const lo = labelOf(st, "opus");
+    const ld = labelOf(st, "deepseek");
+    expect(st.steps[`check.0.${lo}`]).toBeUndefined();
+    expect(st.steps.judge).toBeUndefined();
+    expect(st.steps.apply).toBeUndefined();
+    expect(glm.calls).toHaveLength(0);
+    expect(st.result).toMatchObject({ forfeited: [lo], winner: { label: ld, workerId: "deepseek" } });
+    const report = fs.readFileSync((st.result as { reportMd: string }).reportMd, "utf8");
+    expect(report).toContain("**forfeited**");
+    expect(report).toContain("opus forfeited");
+  });
+
+  it("both forfeiting fails the run", async () => {
+    const { data, run } = await setup();
+    const nothing = () => ({ finalText: "nothing" });
+    const st = await driveRun(run, { dataDir: data, workers: { opus: worker("opus", { implement: nothing }), deepseek: worker("deepseek", { implement: nothing }), glm: judgeWorker() } });
     expect(st.status).toBe("failed");
-    expect(st.failure).toMatchObject({ kind: "exit_check", reason: expect.stringContaining("changed no files") });
+    expect(st.failure).toMatchObject({ stepId: "outcome", kind: "exit_check", reason: expect.stringContaining("both contestants forfeited") });
+  });
+
+  it("after apply, failing checks feed a fix loop on the apply session (recheck.0 → refix.1 → recheck.1)", async () => {
+    const { data, store, run } = await setup();
+    const opus = worker("opus", {
+      implement: () => write(WITH_DIV),
+      apply: () => write("export const broken = 1;\n"),
+      fix: () => write(WITH_DIV.replace("a / b", "(b === 0 ? NaN : a / b)")),
+    });
+    const deepseek = worker("deepseek", { implement: () => write(WITH_DIV) });
+    const workers = { opus, deepseek, glm: judgeWorker() };
+    let st = await driveRun(run, { dataDir: data, workers });
+    approveRun(store.open(run.runId), [1]);
+    st = await driveRun(store.open(run.runId), { dataDir: data, workers });
+    expect(st.status).toBe("completed");
+    expect(st.steps["recheck.0"]!.result).toMatchObject({ allPassed: false });
+    expect(st.steps["refix.1"]!.status).toBe("completed");
+    expect(st.steps["recheck.1"]!.result).toMatchObject({ allPassed: true });
+    const applyCall = opus.calls.find((c) => phaseOf(c) === "apply")!;
+    const refix = opus.calls.find((c) => phaseOf(c) === "fix")!;
+    expect(refix.sessionId).toBe(applyCall.sessionId);
+    expect(fs.readFileSync((st.result as { reportMd: string }).reportMd, "utf8")).toContain("1 fix iteration(s) after apply");
+  });
+
+  it("judge.swapOrderPass keeps only items both passes agree on", async () => {
+    const { data, run } = await setup({ judge: { swapOrderPass: true } });
+    // pass 1: item 1 → A, item 2 → B. Swap pass (A/B exchanged): "B" for item 1 agrees, "B" for item 2 does not.
+    const glm = judgeWorker([
+      { index: 1, side: "B" },
+      { index: 2, side: "B" },
+    ]);
+    const st = await driveRun(run, { dataDir: data, workers: { opus: worker("opus", { implement: () => write(WITH_DIV) }), deepseek: worker("deepseek", { implement: () => write(WITH_DIV) }), glm } });
+    expect(st.status).toBe("awaiting_approval");
+    expect((st.approval!.items as JudgeItem[]).map((i) => i.aspect)).toEqual(["division guard"]);
+    const j = st.steps.judge!.result as { droppedBySwapPass: JudgeItem[] };
+    expect(j.droppedBySwapPass.map((i) => i.aspect)).toEqual(["naming"]);
+    const swapCall = glm.calls.find((c) => c.outFile?.endsWith("swap.json"))!;
+    expect(swapCall.sessionId).toBeUndefined(); // fresh session
+    const swapIn = path.join(swapCall.inputsDir!, "swap");
+    const first = path.join(swapCall.inputsDir!);
+    // the swap pass's A is the first pass's B
+    expect(fs.readFileSync(path.join(swapIn, "diff-A.patch"), "utf8")).toBe(fs.readFileSync(path.join(first, "diff-B.patch"), "utf8"));
   });
 
   it("apply writing into the other worktree fails hard and that worktree is restored", async () => {
@@ -173,11 +242,12 @@ describe("duel workflow", () => {
       implement: () => write(WITH_DIV),
       apply: () => ({ actions: [{ writeFile: { path: path.join(otherWt, "math.js"), content: "sabotage" } }], finalText: "x" }),
     });
-    const deepseek = worker("deepseek", { implement: () => write(WITH_DIV), judge: () => ({ structured: verdict }) });
-    let st = await driveRun(run, { dataDir: data, workers: { opus, deepseek } });
+    const deepseek = worker("deepseek", { implement: () => write(WITH_DIV) });
+    const glm = judgeWorker();
+    let st = await driveRun(run, { dataDir: data, workers: { opus, deepseek, glm } });
     otherWt = (st.steps.setup!.result as DuelSetup).worktrees[labelOf(st, "deepseek")]!;
     approveRun(store.open(run.runId), [1]);
-    st = await driveRun(store.open(run.runId), { dataDir: data, workers: { opus, deepseek } });
+    st = await driveRun(store.open(run.runId), { dataDir: data, workers: { opus, deepseek, glm } });
     expect(st.status).toBe("failed");
     expect(st.failure).toMatchObject({ stepId: "apply", kind: "integrity" });
     expect(fs.readFileSync(path.join(otherWt, "math.js"), "utf8")).toContain("div");
@@ -192,12 +262,13 @@ describe("duel workflow", () => {
           ? { actions: [{ writeFile: { path: "partial.txt", content: "half done" } }, ...fakeQuotaExhausted(reset)] }
           : write(WITH_DIV),
     });
-    const deepseek = worker("deepseek", { implement: () => write(WITH_DIV), judge: () => ({ structured: verdict }) });
-    let st = await driveRun(run, { dataDir: data, workers: { opus, deepseek } });
+    const deepseek = worker("deepseek", { implement: () => write(WITH_DIV) });
+    const glm = judgeWorker();
+    let st = await driveRun(run, { dataDir: data, workers: { opus, deepseek, glm } });
     expect(st.status).toBe("paused_quota");
     const lo = labelOf(st, "opus");
     const cp = st.steps[`implement.${lo}`]!.checkpoint!;
-    st = await driveRun(store.open(run.runId), { dataDir: data, workers: { opus, deepseek }, force: true });
+    st = await driveRun(store.open(run.runId), { dataDir: data, workers: { opus, deepseek, glm }, force: true });
     expect(st.status).toBe("awaiting_approval");
     expect(st.steps[`implement.${lo}`]).toMatchObject({ attempt: 2, checkpoint: cp });
     const wt = (st.steps.setup!.result as DuelSetup).worktrees[lo]!;
@@ -208,7 +279,7 @@ describe("duel workflow", () => {
   it("setup failure is an env_error before any worker runs", async () => {
     const { data, run } = await setup({ setup: [{ argv: [process.execPath, "-e", "process.exit(3)"] }] });
     const opus = worker("opus", {});
-    const st = await driveRun(run, { dataDir: data, workers: { opus, deepseek: worker("deepseek", {}) } });
+    const st = await driveRun(run, { dataDir: data, workers: { opus, deepseek: worker("deepseek", {}), glm: judgeWorker() } });
     expect(st.failure).toMatchObject({ stepId: "setup", kind: "env_error" });
     expect(opus.calls).toHaveLength(0);
   });

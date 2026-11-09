@@ -12,6 +12,7 @@ export const StepFailureKind = z.enum([
   "cancelled",
   "integrity",
   "env_error",
+  "transient",
 ]);
 export type StepFailureKind = z.infer<typeof StepFailureKind>;
 
@@ -76,7 +77,14 @@ export const RunEvent = z.discriminatedUnion("type", [
     costUsd: z.number().nullable(),
     vendorCostUsd: z.number().optional(),
     warning: z.string().optional(),
+    /** "subscription": no metered cost (Claude Pro); vendor cost is API-equivalent only. */
+    billing: z.enum(["metered", "subscription"]).optional(),
   }),
+  z.object({ ...base, type: z.literal("step_retrying"), ...stepRef, reason: z.string(), delayMs: z.number().int().nonnegative() }),
+  /** fractory resume --retry-failed: the failed step reruns from its checkpoint. */
+  z.object({ ...base, type: z.literal("retry_requested"), stepId: STEP_ID }),
+  z.object({ ...base, type: z.literal("warning"), code: z.string(), message: z.string(), stepId: STEP_ID.optional() }),
+  z.object({ ...base, type: z.literal("worktrees_cleaned"), paths: z.array(z.string()) }),
   z.object({
     ...base,
     type: z.literal("quota_observed"),

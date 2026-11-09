@@ -208,7 +208,8 @@ export class ClaudeStreamParser implements StreamParser {
       const message = [o.subtype, typeof o.result === "string" ? o.result : "", Array.isArray(o.errors) ? o.errors.join("; ") : ""]
         .filter(Boolean)
         .join(": ");
-      const kind = classifyError(message, status);
+      // Text matching only on an actual error result (is_error === true), never on model output.
+      const kind = o.is_error === true ? classifyError(message, { status, vendor: "claude" }) : "model";
       out.push({ type: "error", kind, message: message || "Claude Code reported an error", ...(kind === "quota" && this.#lastResetsAt !== undefined ? { resetsAt: this.#lastResetsAt } : {}) });
       return out;
     }
@@ -227,7 +228,7 @@ export class ClaudeStreamParser implements StreamParser {
   finish(end: ProcEnd, stderrTail: string): WorkerEventInput[] {
     this.terminated = true;
     const ev = endError(end, stderrTail, "claude");
-    if (ev.type === "error" && ev.kind === "process" && !this.#sawInit && classifyError(stderrTail) === "auth") {
+    if (ev.type === "error" && ev.kind === "process" && !this.#sawInit && classifyError(stderrTail, { vendor: "claude" }) === "auth") {
       return [{ ...ev, kind: "auth" }];
     }
     return [ev];

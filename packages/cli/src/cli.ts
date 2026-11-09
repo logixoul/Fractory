@@ -8,6 +8,8 @@ import {
   RunNotFoundError,
   RunStore,
   approveRun,
+  cleanRun,
+  gcRuns,
   cancelRun,
   createRun,
   createWorkers,
@@ -34,6 +36,8 @@ export interface CliIo {
   workers?: (config: Config, ctx: { dataDir: string; repo: string; redactor: Redactor }) => Record<string, Worker>;
   /** External cancellation (the bin wires SIGINT/SIGTERM to this). */
   signal?: AbortSignal;
+  /** serve: called with a handler for each line typed on stdin (the bin wires process.stdin). */
+  stdinLines?: (onLine: () => void) => void;
   /** Test hook: how the GUI URL is opened (default: the OS browser). */
   openBrowser?: (url: string) => void;
   /** Progress poll interval (ms). */
@@ -71,7 +75,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       : createWorkers(config, { dataDir: c.dataDir, redactor: c.redactor, baseDir: repo, env: io.env });
 
   /** Drives a run in this process, printing its events as they are appended. */
-  const driveAndReport = async (run: RunHandle, c: ReturnType<typeof ctx>, force: boolean): Promise<number> => {
+  const driveAndReport = async (run: RunHandle, c: ReturnType<typeof ctx>, force: boolean, retryFailed = false): Promise<number> => {
     const st0 = run.state();
     const workers = buildWorkers(runConfig(st0), c, st0.repo);
     let since = run.state().lastSeq;
@@ -84,7 +88,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     };
     const timer = setInterval(flush, io.pollMs ?? 300);
     try {
-      const st = await driveRun(run, { dataDir: c.dataDir, workers, force, ...(io.signal ? { signal: io.signal } : {}) });
+      const st = await driveRun(run, { dataDir: c.dataDir, workers, force, retryFailed, ...(io.signal ? { signal: io.signal } : {}) });
       flush();
       io.out(nextHint(st));
       return exitFor(st);
@@ -106,6 +110,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         for (const w of loaded.warnings) io.err(`warning: ${w}\n`);
         const run = await createRun(c.store, { workflow, repo, promptFile: path.resolve(o.prompt), config: loaded.config });
         io.out(`run ${run.runId} (${workflow}) created; config from: ${loaded.sources.join(", ") || "built-in defaults"}\n`);
+        for (const w of run.state().warnings) io.err(`warning: ${w.message}\n`);
         code = await driveAndReport(run, c, false);
       });
 
@@ -147,9 +152,31 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     .command("resume <runId>")
     .description("continue a paused or interrupted run (quota, approval, needs_attention, crash)")
     .option("--force", "resume a quota pause before the known reset time")
-    .action(async (runId: string, o: { force?: boolean }) => {
+    .option("--retry-failed", "rerun the failed step of a failed run from its checkpoint")
+    .action(async (runId: string, o: { force?: boolean; retryFailed?: boolean }) => {
       const c = ctx();
-      code = await driveAndReport(c.store.open(runId), c, o.force ?? false);
+      code = await driveAndReport(c.store.open(runId), c, o.force ?? false, o.retryFailed ?? false);
+    });
+
+  program
+    .command("clean <runId>")
+    .description("remove a finished run's worktree directories (branches are kept)")
+    .action(async (runId: string) => {
+      const c = ctx();
+      const removed = await cleanRun(c.store.open(runId), c.dataDir);
+      io.out(removed.length ? `removed ${removed.length} worktree(s) of ${runId}; branches kept\n` : `no worktrees left for ${runId}\n`);
+    });
+
+  program
+    .command("gc")
+    .description("clean the worktrees of finished runs not updated for N days (branches are kept)")
+    .requiredOption("--older-than <days>", "age in days")
+    .action(async (o: { olderThan: string }) => {
+      const days = Number(o.olderThan);
+      if (!Number.isFinite(days) || days < 0) throw new UserError(`--older-than must be a number of days: ${o.olderThan}`);
+      const c = ctx();
+      const done = await gcRuns(c.store, { dataDir: c.dataDir, olderThanDays: days });
+      io.out(done.length ? done.map((r) => `${r.runId}: removed ${r.removed.length} worktree(s)\n`).join("") : "nothing to clean\n");
     });
 
   program
@@ -179,8 +206,13 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         ...(defaultWebDir() ? { webDir: defaultWebDir()! } : {}),
         ...(io.workers ? { workers: io.workers } : {}),
       });
-      io.out(`fractory daemon listening on ${d.url}\nGUI: ${d.guiUrl}\n(the URL contains the per-launch token: do not share it)\n`);
+      io.out(`fractory daemon listening on ${d.url}\nGUI: ${d.guiUrl}\n(single-use login link, valid for 60 s; press Enter here for a new one)\n`);
       if (o.open) (io.openBrowser ?? openBrowser)(d.guiUrl);
+      io.stdinLines?.(() => {
+        const u = d.newGuiUrl();
+        io.out(`GUI: ${u}\n`);
+        if (o.open) (io.openBrowser ?? openBrowser)(u);
+      });
       await new Promise<void>((resolve) => {
         if (!io.signal) return; // runs until the process is killed
         if (io.signal.aborted) return resolve();
@@ -222,7 +254,7 @@ function nextHint(st: RunState): string {
     case "needs_attention":
       return `\nrun ${st.runId} needs attention: the main repository changed during a step (${st.attention?.changes.map((c) => c.path).join(", ")}).\nContinue: fractory resume ${st.runId}   Abort: fractory cancel ${st.runId}\n`;
     case "failed":
-      return `\nrun ${st.runId} failed (${st.failure?.kind}) at ${st.failure?.stepId ?? "?"}: ${st.failure?.reason}\n`;
+      return `\nrun ${st.runId} failed (${st.failure?.kind}) at ${st.failure?.stepId ?? "?"}: ${st.failure?.reason}\n${st.failure?.stepId ? `Rerun that step from its checkpoint: fractory resume ${st.runId} --retry-failed\n` : ""}`;
     default:
       return `\nrun ${st.runId}: ${st.status}\n`;
   }

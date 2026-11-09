@@ -50,7 +50,7 @@ export const WorkerEvent = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("error"),
-    kind: z.enum(["quota", "timeout", "killed", "auth", "process", "protocol", "model"]),
+    kind: z.enum(["quota", "transient", "timeout", "killed", "auth", "process", "protocol", "model"]),
     message: z.string(),
     resetsAt: z.number().optional(),
   }),

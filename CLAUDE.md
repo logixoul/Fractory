@@ -19,7 +19,7 @@ Local multi-model orchestrator: Opus (Claude Code, Pro subscription) and DeepSee
 - Orchestrator commits: `-c core.hooksPath=<dataDir>/empty-hooks -c commit.gpgsign=false -c user.name=fractory -c user.email=fractory@localhost commit --no-verify`.
 - After every check run: guarded reset + clean back to the post-step commit. Check outputs become step artifacts only.
 - Step `inputs/` are hashed before/after each step. Any change = hard failure.
-- Daemon binds 127.0.0.1 only, uses a per-launch token, validates Host/Origin, no permissive CORS.
+- Daemon binds 127.0.0.1 only, uses a per-launch token (header or HttpOnly cookie, never in a URL; the GUI link carries a single-use 60 s code), validates Host/Origin, no permissive CORS.
 - **Conserve Pro quota:** automated tests use `FakeWorker` only. Real-model calls only in the opt-in smoke script.
 - **No shell for workers.** Neither Claude nor Pi ever gets Bash/PowerShell. The orchestrator runs checks and feeds failures back (`maxFixIterations`).
 - **Guarded destructive git.** `reset --hard` / `clean -fdx` / `worktree remove` only via the guard that asserts realpath ⊂ `<dataDir>/worktrees/`.

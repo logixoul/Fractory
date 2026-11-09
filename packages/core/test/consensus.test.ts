@@ -61,7 +61,7 @@ async function setup(cfgOver: unknown = {}, workers?: (d: { opus?: Over; deepsee
   const store = new RunStore(data, new Redactor());
   const prompt = path.join(tmpDir(), "prompt.md");
   fs.writeFileSync(prompt, "Add a division function. Mention Claude here on purpose.\n");
-  const config = testConfig({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" } }, consensus: { minRefs: 3 }, ...(cfgOver as object) });
+  const config = testConfig({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } }, consensus: { minRefs: 3 }, ...(cfgOver as object) });
   const run = await createRun(store, { workflow: "consensus", repo, promptFile: prompt, config });
   return { repo, data, store, run };
 }
@@ -72,7 +72,8 @@ describe("consensus workflow", () => {
     const opus = contestant("opus");
     const deepseek = contestant("deepseek", {}, { reviseNoChanges: true });
     const statusBefore = g(repo, "status", "--porcelain", "--ignored");
-    const st = await driveRun(run, { dataDir: data, workers: { opus, deepseek } });
+    const glm = contestant("glm");
+    const st = await driveRun(run, { dataDir: data, workers: { glm, opus, deepseek } });
 
     expect(st.status).toBe("completed");
     const lo = labelOf(st, "opus");
@@ -95,11 +96,15 @@ describe("consensus workflow", () => {
     expect(fs.readFileSync(path.join(crit.inputsDir!, "other-proposal.md"), "utf8")).toContain("As DeepSeek");
 
     // judge inputs: scrubbed prose, repo-relative paths, A/B only
-    const judgeCall = deepseek.calls.find((c) => /You are the judge/.test(c.prompt))!;
+    const judgeCall = glm.calls.find((c) => /You are the judge/.test(c.prompt))!;
+    expect(deepseek.calls.some((c) => /You are the judge/.test(c.prompt))).toBe(false);
     const inputs = fs.readdirSync(judgeCall.inputsDir!).sort();
     expect(inputs).toEqual(["critique-by-A.md", "critique-by-B.md", "proposal-A.md", "proposal-B.md", "task.md"]);
     const all = inputs.map((f) => fs.readFileSync(path.join(judgeCall.inputsDir!, f), "utf8")).join("\n");
-    expect(all).not.toMatch(/claude|deepseek|opus/i);
+    // prose is scrubbed; the user's own task text is exempt (it says "Mention Claude here on purpose")
+    const prose = inputs.filter((f) => f !== "task.md").map((f) => fs.readFileSync(path.join(judgeCall.inputsDir!, f), "utf8")).join(" ");
+    expect(prose).not.toMatch(/claude|deepseek|opus/i);
+    expect(fs.readFileSync(path.join(judgeCall.inputsDir!, "task.md"), "utf8")).toContain("Mention Claude here on purpose");
     expect(all).toContain("[agent]");
     expect(all).not.toContain(data);
     expect(all).toContain("Path math.js:2");
@@ -117,7 +122,7 @@ describe("consensus workflow", () => {
     const { data, run } = await setup({ consensus: { maxRounds: 3, minRefs: 3 } });
     const st = await driveRun(run, {
       dataDir: data,
-      workers: { opus: contestant("opus", {}, { reviseNoChanges: true }), deepseek: contestant("deepseek", {}, { reviseNoChanges: true }) },
+      workers: { glm: contestant("glm"), opus: contestant("opus", {}, { reviseNoChanges: true }), deepseek: contestant("deepseek", {}, { reviseNoChanges: true }) },
     });
     expect(st.status).toBe("completed");
     expect(st.stepOrder.filter((s) => s.startsWith("revise."))).toHaveLength(2);
@@ -126,7 +131,7 @@ describe("consensus workflow", () => {
   it("repairs too few valid refs once, then fails the step", async () => {
     const { data, run } = await setup();
     const opus = contestant("opus", { propose: (_t, n) => ({ finalText: n === 1 ? "vague plan, see nowhere.js:1" : "fixed: math.js:1 math.js:2 util.js:1" }) });
-    const st = await driveRun(run, { dataDir: data, workers: { opus, deepseek: contestant("deepseek") } });
+    const st = await driveRun(run, { dataDir: data, workers: { glm: contestant("glm"), opus, deepseek: contestant("deepseek") } });
     expect(st.status).toBe("completed");
     const proposeCalls = opus.calls.slice(0, 2);
     expect(proposeCalls[1]!.prompt).toContain("could validate only 0");
@@ -134,7 +139,7 @@ describe("consensus workflow", () => {
 
     const again = await setup();
     const vague = contestant("deepseek", { propose: () => ({ finalText: "still vague, see math.js:99" }) });
-    const st2 = await driveRun(again.run, { dataDir: again.data, workers: { opus: contestant("opus"), deepseek: vague } });
+    const st2 = await driveRun(again.run, { dataDir: again.data, workers: { glm: contestant("glm"), opus: contestant("opus"), deepseek: vague } });
     expect(st2.status).toBe("failed");
     expect(st2.failure).toMatchObject({ kind: "exit_check", reason: expect.stringContaining("only 0 valid") });
     expect(vague.calls).toHaveLength(2);
@@ -142,11 +147,11 @@ describe("consensus workflow", () => {
 
   it("repairs invalid structured output once (judge)", async () => {
     const { data, run } = await setup();
-    const deepseek = contestant("deepseek", { judge: (_t, n) => ({ structured: n === 1 ? { summary: "" } : verdict }) });
-    const st = await driveRun(run, { dataDir: data, workers: { opus: contestant("opus"), deepseek } });
+    const glm = contestant("glm", { judge: (_t, n) => ({ structured: n === 1 ? { summary: "" } : verdict }) });
+    const st = await driveRun(run, { dataDir: data, workers: { glm, opus: contestant("opus"), deepseek: contestant("deepseek") } });
     expect(st.failure).toBeUndefined();
     expect(st.status).toBe("completed");
-    const repair = deepseek.calls.filter((c) => c.outFile?.endsWith("decision.json"));
+    const repair = glm.calls.filter((c) => c.outFile?.endsWith("decision.json"));
     expect(repair).toHaveLength(2);
     expect(repair[1]!.prompt).toContain("rejected by the orchestrator's validator");
     expect(repair[1]!.sessionId).toBeDefined();
@@ -157,7 +162,7 @@ describe("consensus workflow", () => {
     const opus = contestant("opus", {
       propose: () => ({ actions: [{ writeFile: { path: "math.js", content: "hacked" } }], finalText: "math.js:1 math.js:2 util.js:1" }),
     });
-    const st = await driveRun(run, { dataDir: data, workers: { opus, deepseek: contestant("deepseek") } });
+    const st = await driveRun(run, { dataDir: data, workers: { glm: contestant("glm"), opus, deepseek: contestant("deepseek") } });
     expect(st.status).toBe("failed");
     expect(st.failure).toMatchObject({ kind: "integrity" });
     const wt = (st.steps.setup!.result as { worktrees: Record<string, string> }).worktrees[labelOf(st, "opus")]!;
@@ -172,7 +177,7 @@ describe("consensus workflow", () => {
         return { finalText: `plan math.js:1 math.js:2 util.js:1 ${t.prompt.length > 0 ? "" : ""}` };
       },
     });
-    const workers = { opus, deepseek: contestant("deepseek") };
+    const workers = { glm: contestant("glm"), opus, deepseek: contestant("deepseek") };
     const st = await driveRun(run, { dataDir: data, workers });
     expect(st.status).toBe("needs_attention");
     expect(st.attention?.changes.map((c) => c.path)).toEqual(["user-edit.txt"]);

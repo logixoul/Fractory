@@ -20,7 +20,12 @@ describe("loadConfig", () => {
     expect(warnings).toEqual([]);
     expect(config.workers.opus).toMatchObject({ kind: "claude", model: "opus", effort: "high", command: "claude" });
     expect(config.workers.deepseek).toMatchObject({ kind: "pi", provider: "together", thinking: "high" });
-    expect(config.roles).toEqual({ contestants: ["opus", "deepseek"], judge: "deepseek" });
+    // default judge: a third model family, not a contestant
+    expect(config.roles).toEqual({ contestants: ["opus", "deepseek"], judge: "glm" });
+    expect(config.workers.glm).toMatchObject({ kind: "pi", provider: "together", model: "zai-org/GLM-5.3" });
+    expect(config.prices["together/zai-org/GLM-5.3"]).toMatchObject({ input: 1.4, output: 4.4, cacheRead: 0.26 });
+    expect(config.judge.swapOrderPass).toBe(false);
+    expect(config.retry).toEqual({ transientMaxRetries: 2, backoffMs: [5000, 30000] });
     expect(config.prices["together/deepseek-ai/DeepSeek-V4.1-Flash-1017"]).toMatchObject({ input: 0.3, output: 1.2, cacheRead: 0.006 });
     expect(config.quota.warnUtilization).toBe(0.8);
     expect(config.consensus).toEqual({ maxRounds: 1, minRefs: 3 });

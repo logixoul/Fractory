@@ -3,7 +3,7 @@ import { serve, type ServerType } from "@hono/node-server";
 import { Redactor, RunStore, createWorkers, defaultConfigDir, defaultDataDir } from "@fractory/core";
 import { createApp } from "./app.js";
 import { DriverPool, type WorkerFactory } from "./drivers.js";
-import { newToken } from "./security.js";
+import { AuthCodes, newToken } from "./security.js";
 
 /** The daemon only ever listens on loopback IPv4 (spec: bind to 127.0.0.1 only). */
 export const DAEMON_HOST = "127.0.0.1";
@@ -19,12 +19,16 @@ export interface DaemonOptions {
   workers?: WorkerFactory;
   tailMs?: number;
   heartbeatMs?: number;
+  /** Test hook for the login-code clock. */
+  now?: () => number;
 }
 
 export interface Daemon {
   url: string;
-  /** URL that opens the GUI (carries the token; give it only to the local browser). */
+  /** First GUI link: carries a single-use login code (60 s), never the token. */
   guiUrl: string;
+  /** Issues a fresh single-use GUI link. */
+  newGuiUrl(): string;
   token: string;
   port: number;
   close(): Promise<void>;
@@ -40,6 +44,7 @@ export async function startDaemon(o: DaemonOptions = {}): Promise<Daemon> {
     o.workers ?? ((config, ctx) => createWorkers(config, { dataDir: ctx.dataDir, redactor: ctx.redactor, baseDir: ctx.repo, env }));
   const pool = new DriverPool(store, dataDir, redactor, factory);
   const token = newToken();
+  const codes = new AuthCodes(o.now);
   let port = 0;
   const app = createApp({
     store,
@@ -47,6 +52,7 @@ export async function startDaemon(o: DaemonOptions = {}): Promise<Daemon> {
     dataDir,
     configDir,
     token,
+    codes,
     port: () => port,
     ...(o.webDir ? { webDir: o.webDir } : {}),
     ...(o.tailMs !== undefined ? { tailMs: o.tailMs } : {}),
@@ -65,7 +71,8 @@ export async function startDaemon(o: DaemonOptions = {}): Promise<Daemon> {
   const url = `http://${DAEMON_HOST}:${port}`;
   return {
     url,
-    guiUrl: `${url}/?token=${token}`,
+    guiUrl: `${url}/auth?code=${codes.issue()}`,
+    newGuiUrl: () => `${url}/auth?code=${codes.issue()}`,
     token,
     port,
     async close() {

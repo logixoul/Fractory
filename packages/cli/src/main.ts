@@ -17,4 +17,10 @@ process.exitCode = await runCli(process.argv.slice(2), {
   err: (s) => process.stderr.write(s),
   env: process.env,
   signal: ac.signal,
+  stdinLines: (onLine) => {
+    if (!process.stdin.isTTY) return;
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", () => onLine());
+    ac.signal.addEventListener("abort", () => process.stdin.pause(), { once: true });
+  },
 });

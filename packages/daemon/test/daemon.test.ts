@@ -83,6 +83,14 @@ function req(d: Daemon, method: string, p: string, headers: Record<string, strin
 }
 
 const auth = (d: Daemon) => ({ authorization: `Bearer ${d.token}` });
+
+/** Logs in like the browser: the single-use GUI link → session cookie. */
+async function loginCookie(d: Daemon): Promise<string> {
+  const link = new URL(d.newGuiUrl());
+  const r = await req(d, "GET", link.pathname + link.search);
+  expect(r.status).toBe(303);
+  return String(r.headers["set-cookie"]).split(";")[0]!;
+}
 const api = async (d: Daemon, method: string, p: string, body?: unknown) => {
   const r = await req(d, method, p, auth(d), body);
   const isJson = String(r.headers["content-type"] ?? "").startsWith("application/json");
@@ -142,25 +150,47 @@ async function waitStatus(d: Daemon, runId: string, statuses: string[]): Promise
 }
 
 describe("daemon security", () => {
-  it("binds to 127.0.0.1 only and hands out a tokened GUI URL", async () => {
+  it("binds to 127.0.0.1 only; the GUI link carries a single-use code, never the token", async () => {
     const d = await daemon();
     expect(d.url).toBe(`http://127.0.0.1:${d.port}`);
-    expect(d.guiUrl).toBe(`${d.url}/?token=${d.token}`);
+    expect(d.guiUrl).toMatch(new RegExp(`^${d.url}/auth\\?code=[\\w-]{32,}$`));
+    expect(d.guiUrl).not.toContain(d.token);
+    expect(d.newGuiUrl()).not.toBe(d.guiUrl);
     expect(d.token.length).toBeGreaterThanOrEqual(43);
   });
 
-  it("requires the token: none/wrong → 401; bearer, ?token= and the cookie it sets → 200", async () => {
+  it("requires the token: none/wrong/?token= → 401; bearer → 200; a login code works once → cookie", async () => {
     const d = await daemon();
     expect((await req(d, "GET", "/api/health")).status).toBe(401);
     expect((await req(d, "GET", "/api/health", { authorization: "Bearer nope" })).status).toBe(401);
-    expect((await req(d, "GET", "/api/health?token=nope")).status).toBe(401);
+    // the token is never accepted from a URL
+    expect((await req(d, "GET", `/api/health?token=${d.token}`)).status).toBe(401);
     expect((await req(d, "GET", "/api/health", auth(d))).status).toBe(200);
-    const viaQuery = await req(d, "GET", `/?token=${d.token}`);
-    expect(viaQuery.status).toBe(200);
-    const cookie = String(viaQuery.headers["set-cookie"]);
+    const link = new URL(d.guiUrl);
+    const login = await req(d, "GET", link.pathname + link.search);
+    expect(login.status).toBe(303);
+    expect(login.headers.location).toBe("/");
+    const cookie = String(login.headers["set-cookie"]);
     expect(cookie).toMatch(/HttpOnly/i);
     expect(cookie).toMatch(/SameSite=Strict/i);
     expect((await req(d, "GET", "/api/health", { cookie: cookie.split(";")[0]! })).status).toBe(200);
+    // single use
+    const again = await req(d, "GET", link.pathname + link.search);
+    expect(again.status).toBe(401);
+    expect(again.headers["set-cookie"]).toBeUndefined();
+    expect((await req(d, "GET", "/auth?code=bogus")).status).toBe(401);
+  });
+
+  it("login codes expire after 60 s", async () => {
+    let now = 1_000_000;
+    const d = await startDaemon({ dataDir: tmp(), configDir: tmp(), workers: fakeWorkers(), now: () => now });
+    cleanups.push(() => d.close());
+    const link = new URL(d.newGuiUrl());
+    now += 61_000;
+    expect((await req(d, "GET", link.pathname + link.search)).status).toBe(401);
+    const fresh = new URL(d.newGuiUrl());
+    now += 59_000;
+    expect((await req(d, "GET", fresh.pathname + fresh.search)).status).toBe(303);
   });
 
   it("rejects foreign Host headers (DNS rebinding) even with a valid token", async () => {
@@ -177,7 +207,7 @@ describe("daemon security", () => {
     expect((await req(d, "GET", "/api/health", { ...auth(d), origin: `http://127.0.0.1:${d.port + 1}` })).status).toBe(403);
     expect((await req(d, "GET", "/api/health", { ...auth(d), origin: d.url })).status).toBe(200);
     expect((await req(d, "GET", "/api/health", { ...auth(d), "sec-fetch-site": "cross-site" })).status).toBe(403);
-    const cookie = String((await req(d, "GET", `/?token=${d.token}`)).headers["set-cookie"]).split(";")[0]!;
+    const cookie = await loginCookie(d);
     expect((await req(d, "POST", "/api/runs/20260101-000000-aaaa/cancel", { cookie })).status).toBe(403);
     expect((await req(d, "POST", "/api/runs/20260101-000000-aaaa/cancel", { cookie, origin: d.url })).status).toBe(404);
   });
@@ -206,6 +236,29 @@ describe("daemon security", () => {
     const dec = await api(d, "GET", `/api/runs/${runId}/file?path=${encodeURIComponent("steps/judge/out/decision.md")}`);
     expect(dec.status).toBe(200);
     expect(dec.headers["content-type"]).toBe("text/plain; charset=utf-8");
+  });
+});
+
+describe("daemon GUI serving", () => {
+  it("serves the built SPA with CSP, assets via the cookie, and an index fallback confined to webDir", async () => {
+    const web = tmp();
+    fs.mkdirSync(path.join(web, "assets"));
+    fs.writeFileSync(path.join(web, "index.html"), "<!doctype html><title>fractory</title>");
+    fs.writeFileSync(path.join(web, "assets", "app.js"), "console.log(1)");
+    const d = await startDaemon({ dataDir: tmp(), configDir: tmp(), workers: fakeWorkers(), webDir: web });
+    cleanups.push(() => d.close());
+    const cookie = await loginCookie(d);
+    const page = await req(d, "GET", "/", { cookie });
+    expect(page.status).toBe(200);
+    expect(page.headers["content-type"]).toMatch(/text\/html/);
+    expect(page.headers["content-security-policy"]).toContain("default-src 'self'");
+    expect(page.headers["content-security-policy"]).toContain("worker-src 'self';");
+    const js = await req(d, "GET", "/assets/app.js", { cookie });
+    expect(js.headers["content-type"]).toMatch(/javascript/);
+    expect(js.body).toBe("console.log(1)");
+    expect((await req(d, "GET", "/assets/app.js")).status).toBe(401);
+    expect((await req(d, "GET", "/run/20260101-000000-aaaa", { cookie })).body).toContain("<title>fractory");
+    expect((await req(d, "GET", "/..%2f..%2fpackage.json", { cookie })).body).toContain("<title>fractory");
   });
 });
 
@@ -240,6 +293,19 @@ describe("daemon API", () => {
     const diff = await api(d, "GET", `/api/runs/${runId}/diff/${labels[0]}`);
     expect(diff.status).toBe(200);
     expect(diff.body).toContain("diff --git a/math.js b/math.js");
+    expect((await api(d, "GET", `/api/runs/${runId}/changes/${labels[0]}`)).json).toEqual(["math.js"]);
+    expect((await api(d, "GET", `/api/runs/${runId}/blob?rev=base&path=math.js`)).body).toContain("export const add");
+    expect((await api(d, "GET", `/api/runs/${runId}/blob?rev=${labels[0]}&path=math.js`)).body).toContain("div");
+    for (const bad of ["rev=base&path=../x", "rev=main&path=math.js", "rev=base&path=C:/x", "rev=base&path=--output=x"]) {
+      expect((await api(d, "GET", `/api/runs/${runId}/blob?${bad}`)).status).toBe(400);
+    }
+    // clean (guarded worktree removal, branches kept) and gc
+    const cleaned = await api(d, "POST", `/api/runs/${runId}/clean`);
+    expect(cleaned.status).toBe(200);
+    expect(cleaned.json.removed).toHaveLength(3);
+    expect((await api(d, "GET", `/api/runs/${runId}`)).json.cleaned.paths).toHaveLength(3);
+    expect((await api(d, "POST", "/api/gc", { olderThanDays: 0 })).json).toEqual({ cleaned: [] });
+    expect((await api(d, "POST", "/api/gc", { olderThanDays: -1 })).status).toBe(400);
   });
 
   it("quota pause: early resume is refused (409) unless forced; cancel works", async () => {

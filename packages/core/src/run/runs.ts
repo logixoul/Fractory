@@ -4,11 +4,13 @@ import * as path from "node:path";
 import { FRACTORY_VERSION } from "../version.js";
 import { drive, type DriveOptions } from "../engine/drive.js";
 import type { WorkflowDef } from "../engine/types.js";
-import { toplevel } from "../git/git.js";
+import { git, toplevel } from "../git/git.js";
+import { assertWorktreeTarget, guardedWorktreeRemove } from "../git/guard.js";
+import { ResumeRefusedError } from "../engine/errors.js";
 import { dataPaths } from "../paths.js";
 import { Config } from "../schemas/config.js";
 import type { Workflow } from "../schemas/run-events.js";
-import type { RunState } from "../state/reducer.js";
+import { TERMINAL_STATUSES, type RunState } from "../state/reducer.js";
 import type { RunHandle, RunStore } from "../store/run-store.js";
 import { newLabels, randomSeed } from "../util/random.js";
 import type { Worker } from "../workers/types.js";
@@ -47,7 +49,74 @@ export async function createRun(store: RunStore, o: CreateRunOptions): Promise<R
     fractoryVersion: FRACTORY_VERSION,
   });
   fs.writeFileSync(path.join(run.dir, "prompt.md"), prompt);
+  // Workers only ever see the base commit (HEAD). Uncommitted work is invisible to them: warn, don't block.
+  const dirty = (await git(["status", "--porcelain=v1", "--untracked-files=normal"], { cwd: repo })).stdout.toString("utf8").trim();
+  if (dirty !== "") {
+    const n = dirty.split("\n").length;
+    const release = run.acquireWriter();
+    try {
+      run.append({
+        type: "warning",
+        code: "dirty_repo",
+        message: `the repository has ${n} uncommitted change(s); workers see only the HEAD commit, not your working tree`,
+      });
+    } finally {
+      release();
+    }
+  }
   return run;
+}
+
+/**
+ * fractory clean: removes a finished run's worktree directories through the guarded function
+ * (§8.3). Branches are kept (never deleted, merged or pushed). Returns the removed paths.
+ */
+export async function cleanRun(run: RunHandle, dataDir: string): Promise<string[]> {
+  const st = run.state();
+  if (!TERMINAL_STATUSES.has(st.status)) {
+    throw new ResumeRefusedError(`run ${st.runId} is ${st.status}; only finished runs can be cleaned (cancel it first)`);
+  }
+  const root = path.join(dataDir, "worktrees", st.runId);
+  const removed: string[] = [];
+  if (fs.existsSync(root)) {
+    for (const label of fs.readdirSync(root)) {
+      const wt = path.join(root, label);
+      await guardedWorktreeRemove(wt, { dataDir, mainRepo: st.repo }).catch(async (e: unknown) => {
+        // Not a registered worktree any more (e.g. pruned): remove the leftover directory, still via the guard.
+        if (!fs.existsSync(wt)) return;
+        assertWorktreeTarget(wt, { dataDir, mainRepo: st.repo });
+        if (fs.existsSync(path.join(wt, ".git"))) throw e;
+        fs.rmSync(wt, { recursive: true, force: true });
+      });
+      removed.push(wt);
+    }
+    try {
+      fs.rmdirSync(root); // empty now
+    } catch {
+      /* something else is left in it: keep */
+    }
+    await git(["worktree", "prune"], { cwd: st.repo, allowFail: true });
+  }
+  const release = run.acquireWriter();
+  try {
+    run.append({ type: "worktrees_cleaned", paths: removed });
+  } finally {
+    release();
+  }
+  return removed;
+}
+
+/** fractory gc: cleans every finished, not yet cleaned run last updated more than `olderThanDays` ago. */
+export async function gcRuns(store: RunStore, o: { dataDir: string; olderThanDays: number; now?: number }): Promise<{ runId: string; removed: string[] }[]> {
+  const cutoff = (o.now ?? Date.now()) - o.olderThanDays * 86_400_000;
+  const out: { runId: string; removed: string[] }[] = [];
+  for (const r of store.list()) {
+    const st = r.state;
+    if (!st || !TERMINAL_STATUSES.has(st.status) || st.cleaned) continue;
+    if (Date.parse(st.updatedAt) > cutoff) continue;
+    out.push({ runId: r.runId, removed: await cleanRun(store.open(r.runId), o.dataDir) });
+  }
+  return out;
 }
 
 /** The config a run was created with (resume never re-reads config files). */

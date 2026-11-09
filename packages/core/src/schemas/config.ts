@@ -117,6 +117,20 @@ export const Config = z
       })
       .prefault({}),
     contextFiles: z.array(z.string()).default(["AGENTS.md", "CLAUDE.md"]),
+    judge: z
+      .object({
+        /** Judge a second time with A/B swapped; keep only what both passes agree on. */
+        swapOrderPass: z.boolean().default(false),
+      })
+      .prefault({}),
+    retry: z
+      .object({
+        /** Automatic retries of a step after a transient error (5xx, network, Together 429). */
+        transientMaxRetries: z.number().int().min(0).max(5).default(2),
+        /** Backoff before retry n (the last value repeats). */
+        backoffMs: z.array(z.number().int().nonnegative()).min(1).default([5_000, 30_000]),
+      })
+      .prefault({}),
     anonymize: z
       .object({
         patterns: z.array(z.string()).default(DEFAULT_ANONYMIZE_PATTERNS),
@@ -161,17 +175,29 @@ export const DEFAULT_CONFIG_INPUT = {
   workers: {
     opus: { kind: "claude", model: "opus", effort: "high" },
     deepseek: { kind: "pi", provider: "together", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017", thinking: "high" },
+    // Judge from a third model family (not a contestant), to avoid self-preference.
+    glm: { kind: "pi", provider: "together", model: "zai-org/GLM-5.3", thinking: "high" },
   },
-  roles: { contestants: ["opus", "deepseek"], judge: "deepseek" },
+  roles: { contestants: ["opus", "deepseek"], judge: "glm" },
   prices: {
     "together/deepseek-ai/DeepSeek-V4.1-Flash-1017": TOGETHER_DS_FLASH_PRICE,
     "together/deepseek-ai/DeepSeek-V4.1-Flash": TOGETHER_DS_FLASH_PRICE,
+    "together/zai-org/GLM-5.3": {
+      input: 1.4,
+      output: 4.4,
+      cacheRead: 0.26,
+      source: "https://www.together.ai/pricing ; https://www.together.ai/models/glm-5-3",
+      checkedAt: "2026-11-09",
+    },
   },
 } satisfies ConfigInput;
 
 /** Non-fatal advice about a valid config. */
 export function configWarnings(c: Config): string[] {
   const out: string[] = [];
+  if (c.roles.contestants.includes(c.roles.judge)) {
+    out.push(`roles.judge '${c.roles.judge}' is also a contestant; its judgments may favour its own work`);
+  }
   for (const [id, w] of Object.entries(c.workers)) {
     if (w.kind === "pi" && /DeepSeek-V4(\.1)?-Flash/i.test(w.model) && w.thinking !== "off" && w.thinking !== "high") {
       out.push(`workers.${id}.thinking='${w.thinking}' is clamped to 'high' by Pi for ${w.model}; use 'off' or 'high'`);

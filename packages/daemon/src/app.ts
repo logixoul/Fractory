@@ -12,6 +12,10 @@ import {
   RunNotFoundError,
   TERMINAL_STATUSES,
   approveRun,
+  cleanRun,
+  gcRuns,
+  changedFiles,
+  git,
   createRun,
   dataPaths,
   isInside,
@@ -23,7 +27,7 @@ import {
   type RunStore,
 } from "@fractory/core";
 import { ConflictError, type DriverPool } from "./drivers.js";
-import { security, securityHeaders } from "./security.js";
+import { security, securityHeaders, type AuthCodes } from "./security.js";
 
 export interface AppDeps {
   store: RunStore;
@@ -31,6 +35,7 @@ export interface AppDeps {
   dataDir: string;
   configDir: string;
   token: string;
+  codes: AuthCodes;
   port: () => number;
   /** Built GUI (packages/web/dist). Optional until M6. */
   webDir?: string;
@@ -49,14 +54,15 @@ const StartBody = z
   .strict()
   .refine((b) => (b.prompt === undefined) !== (b.promptFile === undefined), "give exactly one of prompt or promptFile");
 const ApproveBody = z.object({ items: z.array(z.number().int().positive()) }).strict();
-const ResumeBody = z.object({ force: z.boolean().optional() }).strict();
+const ResumeBody = z.object({ force: z.boolean().optional(), retryFailed: z.boolean().optional() }).strict();
+const GcBody = z.object({ olderThanDays: z.number().min(0) }).strict();
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
 export function createApp(d: AppDeps): Hono {
   const app = new Hono();
   app.use("*", securityHeaders);
-  app.use("*", security({ token: d.token, port: d.port }));
+  app.use("*", security({ token: d.token, codes: d.codes, port: d.port }));
   app.use("/api/*", bodyLimit({ maxSize: 1024 * 1024, onError: (c) => c.json({ error: "request body too large" }, 413) }));
 
   app.onError((e, c) => {
@@ -97,6 +103,8 @@ export function createApp(d: AppDeps): Hono {
               createdAt: r.state.createdAt,
               updatedAt: r.state.updatedAt,
               driving: d.pool.isActive(r.runId),
+              costs: r.state.costs,
+              workerKinds: workerKinds(r.state.config),
             }
           : { runId: r.runId, status: "unreadable", error: r.error ?? null },
       ),
@@ -187,6 +195,33 @@ export function createApp(d: AppDeps): Hono {
     return c.body(diff, 200, { "Content-Type": "text/plain; charset=utf-8" });
   });
 
+  // Changed files of a duel branch, and file contents at a revision ("base" or a label), for Monaco.
+  app.get("/api/runs/:id/changes/:label", async (c) => {
+    const st = runOf(c).state();
+    const setup = duelSetup(st);
+    const label = c.req.param("label");
+    if (!setup?.branches[label]) return c.json({ error: "no branch for this label" }, 404);
+    return c.json(await changedFiles(st.repo, setup.base, worktreeBranch(st.runId, label)));
+  });
+
+  app.get("/api/runs/:id/blob", async (c) => {
+    const st = runOf(c).state();
+    const setup = duelSetup(st);
+    const rev = c.req.query("rev") ?? "";
+    const file = c.req.query("path") ?? "";
+    if (!setup) return c.json({ error: "not a duel run" }, 404);
+    const commit = rev === "base" ? setup.base : setup.branches[rev] ? worktreeBranch(st.runId, rev) : undefined;
+    if (!commit) return c.json({ error: "rev must be 'base' or a contestant label" }, 400);
+    // Repo-relative paths only (the file is read from a commit, never from disk).
+    if (file === "" || file.startsWith("/") || file.startsWith("-") || file.split(/[\\/]/).includes("..") || /^[A-Za-z]:/.test(file)) {
+      return c.json({ error: "invalid path" }, 400);
+    }
+    const r = await git(["show", `${commit}:${file.replace(/\\/g, "/")}`], { cwd: st.repo, allowFail: true });
+    if (r.code !== 0) return c.body("", 200, { "Content-Type": "text/plain; charset=utf-8", "X-Fractory-Missing": "1" });
+    if (r.stdout.length > MAX_FILE_BYTES) return c.json({ error: "file too large" }, 413);
+    return c.body(new Uint8Array(r.stdout), 200, { "Content-Type": "text/plain; charset=utf-8" });
+  });
+
   app.post("/api/runs/:id/approve", async (c) => {
     const b = await body(c, ApproveBody);
     const approved = approveRun(runOf(c), b.items);
@@ -196,11 +231,24 @@ export function createApp(d: AppDeps): Hono {
   app.post("/api/runs/:id/resume", async (c) => {
     const b = await body(c, ResumeBody);
     const run = runOf(c);
-    await d.pool.start(run.runId, b.force ?? false);
+    await d.pool.start(run.runId, { force: b.force ?? false, retryFailed: b.retryFailed ?? false });
     return c.json({ runId: run.runId, driving: true }, 202);
   });
 
   app.post("/api/runs/:id/cancel", (c) => c.json({ result: d.pool.cancel(runOf(c).runId) }));
+
+  // fractory clean / gc: remove worktree directories through the guard; branches are kept.
+  app.post("/api/runs/:id/clean", async (c) => {
+    const run = runOf(c);
+    if (d.pool.isActive(run.runId)) throw new ConflictError(`run ${run.runId} is being driven`);
+    return c.json({ removed: await cleanRun(run, d.dataDir) });
+  });
+
+  app.post("/api/gc", async (c) => {
+    const b = await body(c, GcBody);
+    const all = await gcRuns(d.store, { dataDir: d.dataDir, olderThanDays: b.olderThanDays });
+    return c.json({ cleaned: all.filter((r) => !d.pool.isActive(r.runId)) });
+  });
 
   app.get("/api/quota", (c) => c.json(readQuotaBook(dataPaths(d.dataDir).quotaFile)));
 
@@ -221,6 +269,16 @@ export function createApp(d: AppDeps): Hono {
 }
 
 class BadRequest extends Error {}
+
+function duelSetup(st: { workflow: string; steps: Record<string, { status: string; result?: unknown }> }) {
+  const r = st.steps.setup?.status === "completed" ? (st.steps.setup.result as { base?: string; branches?: Record<string, string> }) : undefined;
+  return r?.base && r.branches ? { base: r.base, branches: r.branches } : undefined;
+}
+
+function workerKinds(config: unknown): Record<string, string> {
+  const w = (config as { workers?: Record<string, { kind?: string }> } | undefined)?.workers ?? {};
+  return Object.fromEntries(Object.entries(w).map(([id, v]) => [id, v.kind ?? "unknown"]));
+}
 
 const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",

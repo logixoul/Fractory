@@ -40,7 +40,7 @@ export class DriverPool {
    * Starts (or resumes) driving a run. Rejects synchronously-detectable refusals (lock held,
    * resume preconditions such as an early quota resume) before returning.
    */
-  async start(runId: string, force = false): Promise<void> {
+  async start(runId: string, opts: { force?: boolean; retryFailed?: boolean } = {}): Promise<void> {
     if (this.#active.has(runId)) throw new ConflictError(`run ${runId} is already being driven by this daemon`);
     const run = this.store.open(runId);
     const st = run.state();
@@ -48,7 +48,7 @@ export class DriverPool {
     const ac = new AbortController();
     let early: unknown;
     let settled = false;
-    const p = driveRun(run, { dataDir: this.dataDir, workers, force, signal: ac.signal }).then(
+    const p = driveRun(run, { dataDir: this.dataDir, workers, force: opts.force ?? false, retryFailed: opts.retryFailed ?? false, signal: ac.signal }).then(
       () => {
         settled = true;
       },

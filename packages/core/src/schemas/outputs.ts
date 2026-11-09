@@ -72,3 +72,23 @@ export function jsonSchemaOf(schema: z.ZodType): Record<string, unknown> {
   delete js.$schema;
   return js;
 }
+
+/**
+ * judge.swapOrderPass: second judging pass with A and B swapped. The judge re-rates the points
+ * of the first pass (by index); only points whose side maps to the same contestant are kept.
+ */
+export const SwapCheck = z
+  .object({
+    verdicts: z
+      .array(
+        z
+          .object({
+            index: z.number().int().positive(),
+            side: z.enum(["A", "B", "both", "neither"]),
+          })
+          .strict(),
+      )
+      .describe("one entry per numbered point"),
+  })
+  .strict();
+export type SwapCheck = z.infer<typeof SwapCheck>;

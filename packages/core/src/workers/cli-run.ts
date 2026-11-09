@@ -89,10 +89,27 @@ export function truncate(s: string, max = MAX_TOOL_OUTPUT): string {
 
 const QUOTA_RE = /usage limit|rate.?limit|limit reached|quota|\b429\b|too many requests/i;
 const AUTH_RE = /\b401\b|\b403\b|invalid.?api.?key|unauthori[sz]ed|authenticat|not logged in|please (run )?\/?log ?in/i;
+const TRANSIENT_RE =
+  /\b5\d\d\b|overloaded|internal server error|bad gateway|service unavailable|gateway time-?out|temporarily unavailable|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed|network error/i;
+const PI_RATE_LIMIT_RE = /\b429\b|rate.?limit|too many requests/i;
 
-export function classifyError(message: string, status?: number | null): "quota" | "auth" | "model" {
-  if (status === 429 || QUOTA_RE.test(message)) return "quota";
-  if (status === 401 || status === 403 || AUTH_RE.test(message)) return "auth";
+export type ErrorClass = "quota" | "transient" | "auth" | "model";
+
+/**
+ * Classifies a vendor error. Only ever applied to an error result (Claude is_error === true,
+ * Pi stopReason=error): successful model output is never text-matched.
+ *  - Claude: 429 / usage-limit text = Pro quota (pause, never retried).
+ *  - Pi/Together: 429 = provider rate limit, transient (retried with backoff).
+ *  - 5xx / overloaded / network = transient.
+ */
+export function classifyError(message: string, o: { status?: number | null; vendor: "claude" | "pi" }): ErrorClass {
+  const s = o.status ?? null;
+  if (s !== null && s >= 500) return "transient";
+  if (s === 401 || s === 403) return "auth";
+  if (o.vendor === "claude" && (s === 429 || QUOTA_RE.test(message))) return "quota";
+  if (o.vendor === "pi" && (s === 429 || PI_RATE_LIMIT_RE.test(message))) return "transient";
+  if (AUTH_RE.test(message)) return "auth";
+  if (TRANSIENT_RE.test(message)) return "transient";
   return "model";
 }
 

@@ -233,7 +233,7 @@ export class PiStreamParser implements StreamParser {
     const stop = last.stopReason;
     if (stop === "error" || stop === "aborted" || stop === "length") {
       const message = `stopReason=${String(stop)}: ${typeof last.errorMessage === "string" ? last.errorMessage : "no error message"}`;
-      return [{ type: "error", kind: stop === "aborted" ? "killed" : classifyError(message), message }];
+      return [{ type: "error", kind: stop === "aborted" ? "killed" : classifyError(message, { vendor: "pi" }), message }];
     }
     if (!this.#sessionId) return [{ type: "error", kind: "protocol", message: "Pi stream had no session record" }];
     if (!this.meta.guardLoaded()) {

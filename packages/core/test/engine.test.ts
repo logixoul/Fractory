@@ -323,6 +323,7 @@ describe("engine: workflow features", () => {
                 vendorCostUsd: 18.3,
               },
             },
+            { emit: { type: "usage", provider: "together", model: "some/unpriced-model", tokens: { input: 5, output: 5 } } },
           ],
         },
       ],
@@ -337,10 +338,15 @@ describe("engine: workflow features", () => {
     const st = await drive(run, demoWorkflow(), deps);
     expect(st.costs.deepseek?.costUsd).toBeCloseTo(0.3 + 1.2 + 0.006, 10);
     expect(st.costs.deepseek?.vendorCostUsd).toBe(18.3);
-    expect(st.costs.deepseek?.costUnknown).toBe(false);
-    expect(st.costs.opus).toMatchObject({ costUnknown: true, tokens: { input: 10, output: 20 } });
+    // an unpriced model makes the total unknown (never guessed)
+    expect(st.costs.deepseek?.costUnknown).toBe(true);
+    // Claude is subscription-billed: not metered, no price warning, vendor cost = API-equivalent
+    expect(st.costs.opus).toMatchObject({ costUnknown: false, costUsd: 0, billing: "subscription", tokens: { input: 10, output: 20 } });
     const usage = run.events().filter((e) => e.type === "usage_recorded");
-    expect(usage.find((u) => u.workerId === "opus")).toMatchObject({ costUsd: null, warning: "no price configured" });
+    const opusUsage = usage.find((u) => u.workerId === "opus")!;
+    expect(opusUsage).toMatchObject({ costUsd: 0, billing: "subscription" });
+    expect(opusUsage).not.toHaveProperty("warning");
+    expect(usage.find((u) => u.priceKey === "together/some/unpriced-model")).toMatchObject({ costUsd: null, warning: expect.stringContaining("no price") });
   });
 
   it("coalesces streamed text deltas without losing content", async () => {

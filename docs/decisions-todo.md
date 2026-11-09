@@ -4,147 +4,199 @@ Choices made while building fractory that you may want to confirm or change. Eac
 
 Binding requirements you already set (docs/interfaces.md §8) are not repeated here. This file lists only the calls made on top of them.
 
+**Status:** M0–M5 reviewed 2026-11-09. Everything there is confirmed except 11 items you changed. Those are marked *(changed in review)* and describe the new behaviour; all are implemented and tested. M6 is open for review.
+
 ---
 
 ## M0: spikes and interfaces
 
-- [ ] **Default Pi model id is the spec's `deepseek-ai/DeepSeek-V4.1-Flash-1017`.** Pi's catalog lists only `…-Flash`. The `-1017` id still works, but Pi warns on stderr that it's a "custom model id". Prices are configured for both ids.
-  - *Alternative:* default to the catalog id `deepseek-ai/DeepSeek-V4.1-Flash`.
-- [ ] **Pi reasoning: only `off` and `high` are effective for this model.** Pi clamps every other level to `high`. Config accepts all levels, but warns on anything other than `off`/`high`. The default is `high`.
-- [ ] **Claude effort is logged as requested only.** Claude Code never reports the effective effort, so `effectiveReasoning` is `null` for Claude steps. The default effort is `high`.
-- [ ] **Project-context parity: both harnesses load no project context.** Claude runs with `--setting-sources ""`; Pi runs with `--no-context-files` and an empty, isolated agent dir. The orchestrator injects the same text into both prompts: by default, the repo-root `AGENTS.md` and `CLAUDE.md` if present.
-  - Consequence: your global `~/.claude/CLAUDE.md`, settings, hooks and MCP servers never apply to fractory runs.
-- [ ] **Pi's internal retries are disabled** (`retry.enabled=false`, `maxRetries=0` in fractory's own Pi agent dir), so every retry is the orchestrator's decision. A transient Together error fails the step instead of being retried silently.
-- [ ] **The Claude "quota rejected" payload has never been observed live.** Detection is deliberately broad:
-  - any `rate_limit_event.status` other than `allowed`/`allowed_warning`,
-  - `api_error_status` 429,
-  - result text matching `usage limit|rate limit|limit reached|quota|429|too many requests`.
-
-  The risk is false positives, where a run pauses for quota when the cause was something else. Nothing is ever retried automatically.
-- [ ] **Prompts always go over stdin.** This avoids the Windows command-line length limit and quoting issues. Pi's `@file` was rejected because the model treated the wrapped file as a prompt injection.
+- [x] **Default Pi model id is the spec's `deepseek-ai/DeepSeek-V4.1-Flash-1017`.** Pi's catalog lists only `…-Flash`. The `-1017` id still works, but Pi warns on stderr that it's a "custom model id". Prices are configured for both ids.
+- [x] **Pi reasoning: only `off` and `high` are effective for this model.** Pi clamps every other level to `high`. Config accepts all levels, but warns on anything other than `off`/`high`. The default is `high`.
+- [x] **Claude effort is logged as requested only.** Claude Code never reports the effective effort, so `effectiveReasoning` is `null` for Claude steps. The default effort is `high`.
+- [x] **Project-context parity: both harnesses load no project context.** Claude runs with `--setting-sources ""`; Pi runs with `--no-context-files` and an empty, isolated agent dir. The orchestrator injects the same text into both prompts: by default, the repo-root `AGENTS.md` and `CLAUDE.md` if present.
+- [x] **Pi's internal retries are disabled**, so every retry is the orchestrator's decision. The orchestrator now retries transient errors itself, with backoff (see M1 *(changed in review)*).
+- [x] **Quota detection** *(changed in review)*:
+  - Signals: a `rate_limit_event.status` other than `allowed`/`allowed_warning`, or Claude `api_error_status` 429.
+  - **Text matching** (`usage limit|rate limit|quota|429|…`) applies **only to a result with `is_error === true`**. Successful model output is never text-matched. Test: a successful result that discusses rate limiting doesn't pause.
+  - A non-success subtype without `is_error` is a plain model error.
+  - Nothing is ever retried automatically for quota.
+- [x] **Prompts always go over stdin.**
 
 ## M1: core engine
 
-- [ ] **Workflows are pure `next(state)` functions.** Each returns the next stage (steps run in parallel) or "done". The engine never reads model text except through schema-validated step results.
-- [ ] **Single writer per run.** Only the driver holding `driver.lock` appends events. A lock left by a dead process is taken over. `cancel` while a driver is running writes a `cancel.request` file, which the driver polls every 500 ms.
-- [ ] **Crash recovery truncates a torn last line.** If the final line of `events.jsonl` is half-written, it's ignored on read and cut off when a writer opens the run. A corrupt line in the middle, or a gap in sequence numbers, refuses to load.
-- [ ] **Crash recovery is tested with constructed logs**, meaning the exact events and torn bytes a crash leaves behind. No test kills a real driver process.
-- [ ] **On resume, only quota failures are retried.** Every other step failure ends the run as `failed`. A step that was running during a crash is marked abandoned and rerun.
-- [ ] **A hard failure in a parallel stage aborts its siblings** to save quota. **A quota hit lets siblings finish**, and their work is kept for the resume. When several steps end badly, the run outcome is chosen in this order: cancelled > failed > quota > needs_attention.
-- [ ] **Resuming before the quota reset time is refused** unless `--force` is given.
-- [ ] **Approving zero items is allowed**, so you can reject everything the judge suggests and still finish the run.
-- [ ] **Streamed text is merged before it's logged.** Text and thinking deltas are coalesced into events of up to 4000 characters or 250 ms. `state.json` writes are throttled to one per 250 ms during worker streaming. This keeps the log small, but the GUI updates in chunks rather than token by token.
-- [ ] **Default judge is DeepSeek (via Pi), which is also a contestant**, as the spec says. Anonymization reduces self-preference but can't remove it. The alternative is another Together model as judge.
-- [ ] **Cost comes from tokens × your price table.** A missing price component makes the cost `null` with a warning, never a guess.
-- [ ] **Toolchain:** TypeScript 7.0.2 (the native compiler), vitest 5, zod 4. `@types/node` is pinned to 22 so the code stays within your Node ≥22.19 minimum.
-- [ ] **`.gitattributes` forces LF** (`* text=auto eol=lf`) and the existing files were renormalized.
+- [x] **Workflows are pure `next(state)` functions.**
+- [x] **Single writer per run** (`driver.lock`, stale-lock takeover, `cancel.request` polled every 500 ms).
+- [x] **Crash recovery truncates a torn last line.** A corrupt middle line or a sequence gap refuses to load.
+- [x] **Crash recovery is tested with constructed logs.**
+- [x] **Retries** *(changed in review)*:
+  - **Transient errors are retried automatically.** That means 5xx/overloaded, network errors (`ECONNRESET`, `fetch failed`, …) and **Together 429** (a provider rate limit for Pi). Claude 429 stays a Pro quota pause.
+  - The step's checkpoint is restored first (edit steps) or its post-step commit (check steps). There are at most `retry.transientMaxRetries` = **2** retries, with backoff `retry.backoffMs` = 5 s then 30 s. Each retry is logged as `step_retrying`.
+  - After that the run fails with kind `transient`.
+  - **`fractory resume <id> --retry-failed`** (and a GUI button) reopens a failed run and reruns the failed step from its checkpoint; this works for any failure kind. A plain `resume` of a failed run is a no-op.
+  - Quota and abandoned (crashed) steps rerun as before.
+- [x] **A hard failure in a parallel stage aborts its siblings; a quota hit lets siblings finish.** Outcome order: cancelled > failed > quota > needs_attention. Transient retries happen inside the step, before its outcome counts.
+- [x] **Resuming before the quota reset time is refused** unless `--force` is given.
+- [x] **Approving zero items is allowed.**
+- [x] **Streamed text is merged before it's logged** (4000 characters or 250 ms; `state.json` throttled to 250 ms).
+- [x] **Default judge** *(changed in review)*:
+  - It's **a third model family via Pi, `zai-org/GLM-5.3` on Together** (worker `glm`, thinking `high`), never a contestant.
+  - Price from Together's pricing page and model page (checked 2026-11-09): input $1.40, output $4.40, cached input $0.26 per 1M tokens. The model is in Pi's Together catalog with thinking support.
+  - **Caveat:** Together's model page also showed a "launching soon" banner. `npm run smoke` (or `-- --glm`) now makes one GLM call to confirm the endpoint is live.
+  - Config warns if `roles.judge` is also a contestant.
+  - Optional **`judge.swapOrderPass`** (default `false`): see M6.
+- [x] **Cost comes from tokens × your price table.** A missing price component gives `null` plus a warning.
+- [x] **Toolchain:** TypeScript 7.0.2, vitest 5, zod 4, `@types/node` 22.
+- [x] **`.gitattributes` forces LF.**
 
 ## M2: adapters, git, checks
 
-- [ ] **Gates and checkpoints are building blocks for now.** Snapshots, step gates, checkpoints and the check runner are implemented and tested, but only the M3 (consensus) and M4 (duel) workflows will call them on every step.
-- [ ] **Pi's path guard must prove it loaded.** On load, the guard writes a per-invocation nonce to an ack file in the step dir, and the adapter rejects `done` without it. Verified against the real Pi with `npm run smoke` (SMOKE OK, 2026-11-09), along with the Claude subscription login and sibling-worktree confinement for both workers.
-- [ ] **Pi gets no secrets except the `.dev.vars` values.** Every env var whose name looks secret (`*KEY*`, `*TOKEN*`, `*SECRET*`, `PASSWORD`, `CREDENTIALS`) is stripped from the Pi child, then the envFile values are added.
-  - Claude has only `ANTHROPIC_*` and the envFile keys removed. Stripping everything secret-looking could break a login that relies on an env token, such as `CLAUDE_CODE_OAUTH_TOKEN`.
-- [ ] **Check and setup commands get no secret-looking env vars.** A repo script that needs a token (e.g. `NPM_TOKEN`) must get it through that command's `env` in the config.
-- [ ] **Claude permission denials are counted as `tool_blocked`.** They're also visible as error tool results.
-- [ ] **Claude usage is recorded per model** from `modelUsage`, so background Haiku calls count too. The price key is `anthropic/<model>`. No Claude prices are configured, so each Claude step logs a "no price" warning. Claude's own `costUSD` is stored for information only, as an API-equivalent figure.
-- [ ] **Raw vendor streams are kept for debugging**, redacted, in `steps/<id>/worker-<id>.raw.jsonl` and `.stderr.log`. Retries and repairs append to the same files with an invocation header. At most 200 stderr/noise lines per invocation go into the event log; the full stderr is in the file.
-- [ ] **Tool outputs in the event log are truncated** to 8000 characters. Final text and structured output are never truncated.
-- [ ] **Snapshots use `git status --ignored=matching`.** Ignored directories are walked file by file, except the ones in `excludeDirs`, which are recorded only as present or absent.
-  - Blind spots: changes inside excluded dirs, and same-size, same-timestamp edits to ignored files over 1 MiB.
-  - Hashing uses `git hash-object --no-filters`, i.e. raw bytes, so a CRLF-only rewrite counts as a change in a read-only step.
-- [ ] **All git calls disable optional locks** (`GIT_OPTIONAL_LOCKS=0`), so `git status` snapshots never rewrite the index. They also force `core.longpaths=true` and `core.quotepath=false`.
-- [ ] **Judge diffs use `--ignore-cr-at-eol` and `--find-renames`.** A change that touches only line endings is invisible to the judge, and renames show as renames.
-- [ ] **Re-creating a worktree is idempotent.** An existing worktree on the expected branch is reused, a leftover branch without a worktree is reattached, and a non-empty foreign directory at the path is an error.
-- [ ] **Check artifacts are copied into `artifacts/<check-name>/`**, keeping their relative paths. Only regular files inside the worktree are copied; symlinks are skipped.
-- [ ] **Config: only `argv[0]` must be non-empty.** Later arguments may be empty strings (e.g. `--flag ""`).
-- [ ] **The smoke script is plain `.mjs` and runs on the built `dist/`** (`npm run smoke`). Claude defaults to `--model haiku` with effort `low`, and Pi to thinking `off`, to keep the call cheap.
+- [x] **Gates and checkpoints** are used on every step since M3/M4.
+- [x] **Pi's path guard must prove it loaded** (nonce ack; verified with `npm run smoke`).
+- [x] **Pi gets no secrets except the `.dev.vars` values and `passEnv`.** Claude has only `ANTHROPIC_*` and the envFile keys removed.
+- [x] **Check and setup commands get no secret-looking env vars.**
+- [x] **Claude permission denials are counted as `tool_blocked`.**
+- [x] **Claude billing** *(changed in review)*:
+  - Claude is **subscription-billed**: its usage is recorded with `billing: "subscription"` and `costUsd: 0`, with **no price warning**.
+  - Its vendor `costUSD` is shown as **"API-equivalent"** (CLI `show`, GUI header) and is not counted as spend.
+  - Usage is still recorded per model from `modelUsage`.
+- [x] **Raw vendor streams are kept for debugging** (redacted, per step).
+- [x] **Tool outputs in the event log are truncated** to 8000 characters.
+- [x] **Snapshots use `git status --ignored=matching`** (blind spots documented; `--no-filters` hashing).
+- [x] **All git calls disable optional locks** and force long paths / unquoted paths.
+- [x] **Judge diffs use `--ignore-cr-at-eol` and `--find-renames`.**
+- [x] **Re-creating a worktree is idempotent.**
+- [x] **Check artifacts are copied into `artifacts/<check-name>/`.**
+- [x] **Config: only `argv[0]` must be non-empty.**
+- [x] **The smoke script runs on the built `dist/`.** It now covers Claude (`haiku`), DeepSeek and the GLM judge.
 
 ## M3: consensus workflow and CLI
 
-- [ ] **Each contestant reads its own worktree** (`worktrees/<run>/<label>` at the base commit), and the judge gets a third worktree with its own random label. Consensus steps are all read-only, so these worktrees never get commits.
-  - *Alternative:* one shared detached worktree. That's simpler, but the Pi guard could then no longer separate the two contestants.
-- [ ] **Consensus worktrees are left in place after the run** (like duel branches); nothing deletes them yet. A `fractory clean <run>` command could remove them through the guard.
-- [ ] **The base is the repo's HEAD commit, not its working tree.** Uncommitted changes in your repo aren't visible to the workers. Project context (`AGENTS.md`, `CLAUDE.md`) is read from the base commit too, so both workers get identical bytes.
-- [ ] **No per-repo `setup` for consensus.** Consensus only reads code, so `npm ci` etc. is skipped. Duel runs it (M4).
-- [ ] **Each contestant keeps one session across all its steps** (propose → critique → revise rounds, resumed by session id). This is cheaper and gives context continuity, but the critique and revision steps aren't fresh, independent judgments.
-- [ ] **Too few valid `path:line` refs get one repair turn.** If a proposal or revision has fewer than `minRefs` (default 3) valid refs, the same session is resumed once with the invalid refs listed. A second shortfall fails the run (`exit_check`).
-- [ ] **What counts as a valid ref:** the file exists in the base checkout and the line (or range) is within the file.
-  - Accepted forms: `path:line`, `path:line-line`, Windows `path\line` style, absolute paths under the worktree or repo, and `path#Lnn`.
-  - URLs and times are ignored. A ref needs a `/` or a file extension, so a bare `Makefile:3` isn't counted.
-- [ ] **Revision rounds after the first** give the worker its round-1 critique plus the other's *current* proposal. There's no new critique per round.
-  - Early stop: both workers report `noChanges` in the same round.
-  - A worker that reports `noChanges` keeps its previous proposal.
-- [ ] **Revisions return the full proposal inside the structured JSON** (`{noChanges, proposal, changeSummary}`), not a diff.
-- [ ] **What the judge sees:** the task, both current proposals and both critiques, scrubbed and with paths made repo-relative. It doesn't see the revision change summaries.
-  - A/B order comes from the run's seed, so it's stable across resumes.
-  - Your prompt is scrubbed too: a mention of "Claude" in your task text becomes `[agent]`.
-- [ ] **Model ids and worker ids are added to the scrub list automatically.** This covers configured models, models the workers reported, and worker ids of 3+ characters, matched as whole tokens, longest first.
-- [ ] **The leak check also forbids the data-dir path and worktree paths in judge inputs.** A hit fails the judge step (`integrity`).
-- [ ] **Every judge decision needs at least one valid evidence ref**, with one repair turn otherwise. Invalid refs are listed in `decision.md` but don't fail the run as long as each decision has a valid one.
-- [ ] **`decision.md` is rendered by the orchestrator from the validated JSON**, not written by the judge. It names the real workers next to A/B, since it's for you. `decision.json` keeps the verdict plus the A/B → label/worker mapping.
-- [ ] **Structured output for non-Claude workers goes through `out/<name>.json`.** The JSON Schema is pasted into the prompt. Claude gets `--json-schema` instead. Either way it's validated with the same zod schema, with one repair turn.
-- [ ] **Pi config gains `passEnv`** (default `["TOGETHER_API_KEY"]`): secret-looking env vars that are still passed to Pi. Without it, a key set in your shell rather than in an envFile would be stripped. envFile values override shell values.
-- [ ] **A relative `envFile` path is resolved against the target repo.** Use an absolute path in the global config, e.g. for this repo's `.dev.vars`.
-- [ ] **A resumed run uses the config recorded when it was created**, never the current config files. That keeps resume deterministic; to pick up changed config, start a new run.
-- [ ] **The CLI drives runs in-process** and prints progress by polling the event log every 300 ms.
-  - The first Ctrl-C cancels cleanly and kills the worker process trees; a second exits immediately.
-  - Exit codes: 0 completed, 1 failed/cancelled/error, 2 paused (quota, approval, attention), 64 usage error.
-- [ ] **`approve` only records the approval; a separate `resume` continues the run.** The GUI can do both in one click.
-- [ ] **Parallel steps that see the same main-repo change report it once** in `needs_attention`.
-- [ ] **vitest's per-test timeout is now 60 s.** End-to-end consensus tests with real git take 4–8 s each on Windows.
+- [x] **Each contestant reads its own worktree**; the judge gets a third.
+- [x] **Cleaning up worktrees** *(changed in review)*:
+  - **`fractory clean <run>`** removes a *finished* run's worktree directories through the guarded `worktree remove` (§8.3) and keeps the branches. It refuses unfinished runs and is idempotent.
+  - **`fractory gc --older-than <days>`** does the same for every finished, not yet cleaned run whose last update is older than N days.
+  - Also available in the API (`POST /api/runs/:id/clean`, `POST /api/gc`) and the GUI ("Remove worktrees" on a run, "Clean up" on the runs list).
+- [x] **The base is the repo's HEAD commit, not its working tree** *(changed in review)*. When the main repo has uncommitted changes at run start, the run records a **`dirty_repo` warning** (CLI prints it, GUI shows it) and continues.
+- [x] **No per-repo `setup` for consensus.**
+- [x] **Each contestant keeps one session across all its steps.**
+- [x] **Too few valid `path:line` refs get one repair turn.**
+- [x] **What counts as a valid ref.**
+- [x] **Revision rounds after the first** use the round-1 critique plus the other's current proposal.
+- [x] **Revisions return the full proposal inside the structured JSON.**
+- [x] **What the judge sees** *(changed in review)*:
+  - The task, both current proposals and both critiques; A/B order from the run's seed.
+  - **Your task text is exempt from scrub and leak check**: it's passed verbatim.
+  - Proposals and critiques are still scrubbed and leak-checked.
+- [x] **Model ids and worker ids are added to the scrub list automatically.**
+- [x] **The leak check also forbids data-dir and worktree paths** in judge prose.
+- [x] **Every judge decision needs at least one valid evidence ref.**
+- [x] **`decision.md` is rendered by the orchestrator.**
+- [x] **Structured output for non-Claude workers goes through `out/<name>.json`.**
+- [x] **Pi `passEnv`** (default `["TOGETHER_API_KEY"]`).
+- [x] **Relative `envFile` paths** *(changed in review)* resolve against **the directory of the config file that declares them** (global or per-repo); an override resolves against the working directory. The recorded run config stores the absolute path, never the values (tested).
+- [x] **A resumed run uses its recorded config.**
+- [x] **The CLI drives runs in-process** (exit codes 0/1/2/64).
+- [x] **`approve` records; `resume` continues.**
+- [x] **Parallel steps that see the same main-repo change report it once.**
+- [x] **vitest's per-test timeout is 60 s.**
 
 ## M4: duel workflow, approve and resume
 
-- [ ] **Limitation: during the parallel implement/fix stages, a write into the *other* contestant's worktree can't be told apart from that contestant's own edits.** Each step's snapshot gate ignores the sibling's worktree, because the sibling is allowed to change it at the same time.
-  - In this stage, isolation relies on the harness confinement verified in M0/M2 and by the smoke test: the Pi path guard and Claude's cwd confinement.
-  - Outside the parallel stages (judge, apply, recheck), a cross-worktree write fails the step hard and the worktree is restored; there's a test for this.
-  - *Alternatives:* run implement steps one after the other (slower, but fully attributable), or compare each change against the worker's own tool calls.
-- [ ] **Each contestant's chain moves at its own pace.** The pattern is implement → check.0 → [fix.i → check.i …], running until checks pass or `maxFixIterations` (default 2) is used up. One contestant can be fixing while the other is already done. The judge starts when both chains have finished.
-- [ ] **A contestant whose checks still fail after the last fix isn't eliminated.** It goes to the judge with its failing check results.
-- [ ] **An implementation with no changes against the base fails the run** (`exit_check`). Fix steps have no such check.
-- [ ] **What the judge sees in a duel:** the scrubbed task, both squashed diffs (verbatim), and both final check results (table plus log tails of failed checks, with paths made repo-relative).
-  - It doesn't see the workers' own change summaries, since those are prose that would need scrubbing.
-  - Code comments like "Written by Claude" do reach the judge, because code is never rewritten (§8.16).
-- [ ] **Check logs get only the path leak check, not the name scrub.** They're tool output, not prose.
-- [ ] **Each judge item needs at least one evidence ref that resolves in either side's final worktree or the base**, with one repair turn otherwise.
-- [ ] **`duel.applyWorker` is a new config option**, defaulting to the first contestant (`opus`). It names whose session applies the approved items; it must be a contestant. Its branch gets the apply commit.
-- [ ] **The apply worker resumes its own session and gets two input files.**
-  - The approved items, with A/B rewritten as "yours" / "the other implementation".
-  - An excerpt of the other side's diff: only the sections for files cited by approved items where the other side was better. If none match, the full diff.
-- [ ] **With zero approved items, apply and recheck are skipped** and the report says so.
-- [ ] **Recheck runs the checks once after apply**, with no fix loop after it. Failures are only reported.
-- [ ] **Edit-step retries reuse the step's first checkpoint.** On a retry after a quota pause or crash, the worktree is restored to the original checkpoint (setup reruns if the clean removed anything), and no second checkpoint commit is made.
-- [ ] **Check steps don't use the full snapshot gate.** They run no worker; the check runner verifies their own worktree (§8.18). A retried check step first restores to the post-step commit.
-- [ ] **Per-repo `setup` runs once per contestant worktree at duel setup**, and again after any clean that removed files. The judge worktree gets no setup.
-- [ ] **`report.md` is written by the orchestrator.** It covers branches, heads, files changed, fix iterations and check status per side; the judge summary and items with approved ones ticked; the apply worker's summary; and the recheck results.
-- [ ] **CLI:** a duel that pauses for approval exits with code 2 and prints the items. `fractory approve <id> --items 1,3` then `fractory resume <id>` finish it. The final output lists the branches, which are never merged or pushed.
+- [x] **Limitation: in the parallel implement/fix stages, a write into the other worktree can't be told apart from that contestant's own edits.** Isolation there relies on harness confinement.
+- [x] **Each contestant's chain moves at its own pace.**
+- [x] **A contestant whose checks still fail after the last fix goes to the judge.**
+- [x] **Forfeit** *(changed in review)*:
+  - An implementation with no changes means **that contestant forfeits**: no checks, and **no judge**, approval or apply.
+  - The report and the run result name **the other branch as the result** (`result.winner`).
+  - Only if **both** forfeit does the run fail (`exit_check` at step `outcome`).
+- [x] **What the judge sees in a duel** *(changed in review)*:
+  - Your **task text verbatim**, both squashed diffs verbatim, and both final check results.
+  - New: a **warning-only scan of the diffs for worker identity tokens** (`identity_in_diff`). Code is never rewritten.
+- [x] **Check logs get only the path leak check.**
+- [x] **Each judge item needs one evidence ref that resolves somewhere.**
+- [x] **`duel.applyWorker`** (default: the first contestant).
+- [x] **The apply worker resumes its own session** with the approved items and the other diff's excerpts.
+- [x] **With zero approved items, apply is skipped.**
+- [x] **After apply** *(changed in review)*: the full **check → fix loop up to `maxFixIterations`**: `recheck.0` → [`refix.i` → `recheck.i`]. Fixes resume the apply session.
+- [x] **Edit-step retries reuse the step's first checkpoint** (now also for transient retries).
+- [x] **Check steps don't use the full snapshot gate.**
+- [x] **Per-repo `setup` per contestant worktree.**
+- [x] **`report.md` is written by the orchestrator.** It now also covers forfeits, the post-apply fix iterations, and items dropped by the swap pass.
+- [x] **CLI duel/approve/resume flow.**
 
 ## M5: daemon and security
 
 API, all under `/api` and all requiring the token:
-- `GET` `health`, `runs`, `runs/:id`, `runs/:id/events?since=`
-- `GET runs/:id/events/stream`: SSE that replays from `Last-Event-ID` or `?since=`, then tails the log
-- `GET runs/:id/file?path=`, `runs/:id/diff/:label`, `quota`
-- `POST` `runs` (`{workflow, repo, prompt | promptFile}`), `runs/:id/approve` (`{items}`), `runs/:id/resume` (`{force?}`), `runs/:id/cancel`
+- `GET`: `health`, `runs`, `runs/:id`, `runs/:id/events?since=`, `runs/:id/events/stream` (SSE), `runs/:id/file?path=`, `runs/:id/diff/:label`, `runs/:id/changes/:label`, `runs/:id/blob?rev=&path=`, `quota`
+- `POST`: `runs`, `runs/:id/approve`, `runs/:id/resume` (`{force?, retryFailed?}`), `runs/:id/cancel`, `runs/:id/clean`, `gc` (`{olderThanDays}`)
 
-- [ ] **The token can arrive three ways:** an `Authorization: Bearer` header, `?token=` in the URL (the GUI link and `EventSource`, which can't set headers), or a cookie.
-  - The cookie is HttpOnly, SameSite=Strict and named per port. It's set from a valid `?token=`, so the GUI's assets and API calls work without the token in every URL.
-  - A state-changing request authenticated only by the cookie must also carry our `Origin`.
-  - The token is 32 random bytes per launch, compared in constant time.
-- [ ] **The token is visible in the browser's address bar and history** after `fractory serve` opens the GUI, and in the process list of the browser launch.
-  - Mitigations: `Referrer-Policy: no-referrer`, and in M6 the GUI will remove it from the address bar right after loading.
-  - *Alternative:* a one-time code exchanged for the cookie.
-- [ ] **Host and Origin rules:** the Host must be `127.0.0.1:<port>` or `localhost:<port>`. The Origin, if sent, must be `http://127.0.0.1:<port>` or `http://localhost:<port>`. `Sec-Fetch-Site: cross-site` and `same-site` are refused. Preflights (`OPTIONS`) get 405, and no `Access-Control-*` header is ever sent.
-- [ ] **Security headers on every response:** CSP `default-src 'self'` (inline styles allowed, which Monaco needs), `nosniff`, `X-Frame-Options: DENY`, COOP/CORP same-origin, `Cache-Control: no-store`.
-- [ ] **Run files are always served as `text/plain`**, so model output can never render as HTML from the daemon's origin; the GUI renders markdown itself, sanitized. Paths are realpath-confined to the run directory, and files are capped at 5 MiB.
-- [ ] **The daemon drives runs in its own process.** One driver per run is allowed; the run's lock still protects against a CLI driving the same run, which gets a 409.
-  - Refusals that happen at start (lock held, unapproved gate, quota not reset) come back as 409 with the reason.
-  - When the daemon stops, it cancels its active drivers. They can be resumed later from the CLI or the GUI.
-- [ ] **The daemon never resumes interrupted runs by itself** after a restart. A run left "running" by a crash stays that way until you resume it.
-- [ ] **SSE polls the event log every 250 ms**, reading only new bytes. It sends a heartbeat every 15 s, and an `end` event once the run is finished and fully sent. Event ids are the log's seq numbers, so a reconnect with `Last-Event-ID` resumes exactly.
-- [ ] **A prompt sent as text over the API is saved as a file** in `<dataDir>/prompts/`, then snapshotted into the run like a CLI prompt file.
-- [ ] **`fractory serve` options:** `--port` defaults to any free port, and `--no-open` skips the browser.
-  - The browser is opened without a shell: `rundll32 url.dll,FileProtocolHandler` on Windows, `open` on macOS, `xdg-open` on Linux.
-  - Ctrl-C stops the daemon.
-- [ ] **The daemon serves the built GUI from `packages/web/dist`** when it exists. Until M6, it shows a placeholder page.
+- [x] **Authentication** *(changed in review)*:
+  - The token is accepted only as an `Authorization: Bearer` header or the HttpOnly SameSite=Strict cookie. **It never appears in a URL**; `?token=` is refused.
+  - The GUI link is `/auth?code=…` with a **single-use code that expires after 60 s**. `GET /auth` exchanges it for the cookie and redirects (303) to `/`; a used or expired code gets 401.
+  - `fractory serve` prints a fresh link each time you press Enter.
+  - Verified in headless Chrome: after the redirect, the address bar shows `/#/run/…` with no code, and `document.cookie` is empty (HttpOnly).
+- [x] **Host and Origin rules, no CORS.**
+- [x] **Security headers on every response.** M6 tightened the CSP to `worker-src 'self'` (see M6).
+- [x] **Run files are always served as `text/plain`.**
+- [x] **The daemon drives runs in its own process** (lock conflicts → 409).
+- [x] **The daemon never resumes interrupted runs by itself.**
+- [x] **SSE: 250 ms polling, 15 s heartbeat, `end` event, ids = seq.**
+- [x] **A prompt sent as text is saved in `<dataDir>/prompts/`.**
+- [x] **`fractory serve` options** (`--port`, `--no-open`, shell-free browser launch).
+- [x] **The daemon serves the built GUI from `packages/web/dist`.**
+
+## M6: GUI (and how the review changes were implemented)
+
+GUI:
+- [ ] **Svelte 5 SPA with hash routing:** `#/` runs list; `#/run/<id>/live|compare|verdict`. A fragment survives the `/auth` → `/` redirect, so a login link can deep-link into a run.
+- [ ] **All state comes from the daemon.**
+  - The live view replays the run's event log over SSE from the start, and reconnects with `Last-Event-ID`.
+  - It refetches `state` at most every 300 ms after events.
+  - The runs list polls every 3 s, the header every 10 s. A page refresh loses nothing.
+- [ ] **Live view** has one pane per contestant, plus "judge" and "orchestrator" panes. Check steps go to their contestant's pane. Text deltas are merged. Tool calls are collapsible and paired with their results; blocked calls are marked red; transient retries appear inline.
+- [ ] **The phase indicator** is derived only from step states:
+  - Consensus: setup · propose · critique · revise · judge.
+  - Duel: setup · implement · check/fix · judge · approve · apply · recheck · report.
+- [ ] **Markdown rendering:** marked → DOMPurify, with `img`, `style`, `form` and `input` forbidden, and links forced to `noopener` + new tab.
+  - `path:line` refs, including inside code spans, become `vscode://file/<repo>/<path>:<line>` links.
+  - They point to **your main repo's** files, not the worktrees.
+- [ ] **Compare view:**
+  - Consensus: proposals, critiques and each revision round side by side.
+  - Duel: Monaco side-by-side diff per changed file, in three modes (A vs B, base vs A, base vs B). File contents come from `git show <commit>:<path>` through a new `blob` endpoint, which takes repo-relative paths only.
+- [ ] **Monaco is loaded lazily**, only in the duel compare view (the editor chunk is about 2.7 MB).
+  - Only the editor worker is used; language services aren't loaded, and syntax colouring comes from Monaco's basic tokenizers.
+  - **Verified under the daemon's CSP in headless Chrome:** the diff renders, the worker starts as a same-origin script, and there are no CSP violations or console errors. So `worker-src` was **tightened to `'self'`**; `blob:` isn't needed.
+- [ ] **Verdict view:**
+  - Consensus: shows `decision.md`.
+  - Duel: shows the judge items with checkboxes, "Approve N item(s) and resume" or "Approve only", the approved state, and `report.md` when done.
+- [ ] **Run controls:**
+  - Resume / Continue (needs_attention) / force resume (quota).
+  - Cancel / Abort.
+  - Retry failed step.
+  - Remove worktrees.
+  - Warnings and forfeits are shown as notes.
+- [ ] **Header widget:**
+  - Claude quota windows from the last rate-limit events.
+  - Per-worker token totals across runs: metered workers show their computed cost; subscription workers show "API-equivalent $…".
+- [ ] **The GUI duplicates two small pieces of core** (the `path:line` regex and the state types), because core is Node-only. The two regexes must be kept in sync.
+- [ ] **Dependencies:**
+  - Monaco bundles DOMPurify ≤3.4.16, which has critical XSS advisories. A root `overrides` forces 3.4.17 everywhere; `npm audit` no longer reports it.
+  - Two **low** advisories remain in `deepmerge` (via the Svelte Vite plugin, build-time only).
+- [ ] **Unit tests cover the GUI's pure logic** (panes, phases, refs → links, token stripping); there are no component tests. The screens were checked by hand in headless Chrome against a fake duel run.
+
+Review changes, implementation choices:
+- [ ] **What counts as transient:** HTTP 5xx and "overloaded", network errors, and for Pi/Together any 429 or "rate limit". "Max 2 attempts" was read as **2 retries** (3 tries in total). The retry counter is per step and resets on `--retry-failed`.
+- [ ] **`judge.swapOrderPass` is a verification pass, not a second full verdict.**
+  - The judge (fresh session) gets the same inputs with A and B swapped, plus the numbered points from pass 1. It rates each point A / B / both / neither.
+  - A point is kept only if both passes attribute it to the same contestant(s). Dropped points are listed in `decision.json`/`verdict.json`, `decision.md` and the report.
+  - If no point survives, the judge step fails (`exit_check`).
+  - Swap-pass inputs are written before the gate's `inputs/` baseline (§8.19).
+  - *Alternative:* two independent full verdicts matched by topic. That needs fuzzy matching of free text, which isn't machine-checkable.
+- [ ] **Both-forfeit is recorded as a failing `outcome` step**, so the failure is a normal, logged step result.
+- [ ] **`clean`:**
+  - It removes all of a run's worktree directories (contestants and judge).
+  - Leftover non-git directories are removed only after the guard's path check.
+  - It records `worktrees_cleaned` in the run log.
+  - **`gc` uses the run's last update time.**
+- [ ] **Login codes live only in daemon memory** (they don't survive a restart). Pressing Enter in the `serve` terminal mints a new one and opens it if `--open` is in effect.
+- [ ] **The dirty-repo check** counts tracked changes and untracked files (not ignored files) at run creation only.

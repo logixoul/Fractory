@@ -75,8 +75,16 @@ export function formatShow(st: RunState): string {
   }
   out.push(table(rows).trimEnd(), "", "usage:");
   for (const [w, c] of Object.entries(st.costs)) {
+    const tokens = `in ${c.tokens.input}, out ${c.tokens.output}, cache r/w ${c.tokens.cacheRead}/${c.tokens.cacheWrite}`;
+    if (c.billing === "subscription") {
+      out.push(`  ${w}: ${tokens}; subscription (not metered); API-equivalent $${c.vendorCostUsd.toFixed(4)}`);
+      continue;
+    }
     const cost = c.costUnknown ? `$${c.costUsd.toFixed(4)} + unknown` : `$${c.costUsd.toFixed(4)}`;
-    out.push(`  ${w}: in ${c.tokens.input}, out ${c.tokens.output}, cache r/w ${c.tokens.cacheRead}/${c.tokens.cacheWrite}; cost ${cost}; vendor-reported $${c.vendorCostUsd.toFixed(4)} (informational)`);
+    out.push(`  ${w}: ${tokens}; cost ${cost}; vendor-reported $${c.vendorCostUsd.toFixed(4)} (informational)`);
+  }
+  for (const w of st.warnings ?? []) out.push(`warning: ${w.message}`);
+  {
   }
   if (st.pause) out.push("", `paused (quota): ${st.pause.workerId}${st.pause.resetsAt ? ` until ${new Date(st.pause.resetsAt).toISOString()}` : ""}`);
   if (st.attention) {

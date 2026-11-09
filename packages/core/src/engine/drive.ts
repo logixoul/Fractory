@@ -12,6 +12,8 @@ export interface DriveOptions {
   signal?: AbortSignal;
   /** Resume a quota-paused run before the known reset time. */
   force?: boolean;
+  /** Reopen a failed run and rerun its failed step from that step's checkpoint. */
+  retryFailed?: boolean;
 }
 
 const MAX_ITERATIONS = 10_000;
@@ -36,7 +38,7 @@ export async function drive(run: RunHandle, wf: WorkflowDef, deps: EngineDeps, o
   }, deps.cancelPollMs ?? 500);
   poll.unref();
   try {
-    if (!prepare(run, now(), opts.force ?? false)) return run.state();
+    if (!prepare(run, now(), opts.force ?? false, opts.retryFailed ?? false)) return run.state();
     run.append({ type: "driver_started", pid: process.pid, hostname: os.hostname() });
     for (const st of Object.values(run.state().steps)) {
       if (st.status === "running") run.append({ type: "step_abandoned", stepId: st.id, attempt: st.attempt });
@@ -52,8 +54,14 @@ export async function drive(run: RunHandle, wf: WorkflowDef, deps: EngineDeps, o
 }
 
 /** Checks resume preconditions and records the transition. Returns false if there is nothing to do. */
-function prepare(run: RunHandle, now: number, force: boolean): boolean {
+function prepare(run: RunHandle, now: number, force: boolean, retryFailed: boolean): boolean {
   const st = run.state();
+  if (st.status === "failed" && retryFailed) {
+    if (!st.failure?.stepId) throw new ResumeRefusedError("the run failed outside a step; there is no step to retry");
+    run.append({ type: "retry_requested", stepId: st.failure.stepId });
+    run.append({ type: "resumed", force });
+    return true;
+  }
   if (TERMINAL_STATUSES.has(st.status)) return false;
   if (st.cancelRequested || run.cancelRequested()) {
     if (!st.cancelRequested) run.append({ type: "cancel_requested" });
@@ -210,7 +218,47 @@ type StepOutcome =
   | { kind: "quota"; stepId: string; workerId: string; resetsAt?: number }
   | { kind: "cancelled" };
 
+/**
+ * Runs a step; transient failures (5xx, network, provider rate limits) are retried with
+ * backoff up to retry.transientMaxRetries times. Each retry is a new attempt, which restores
+ * the step's checkpoint (edit steps) or post-step commit (check steps) first.
+ */
 async function runStep(
+  run: RunHandle,
+  step: WorkStep,
+  deps: EngineDeps,
+  runSignal: AbortSignal,
+  siblingSignal: AbortSignal,
+  now: () => number,
+): Promise<StepOutcome> {
+  const { transientMaxRetries, backoffMs } = deps.config.retry;
+  for (;;) {
+    const r = await runStepAttempt(run, step, deps, runSignal, siblingSignal, now);
+    if (r.kind !== "failed" || r.failKind !== "transient") return r;
+    const done = run.state().retries[step.id] ?? 0;
+    if (done >= transientMaxRetries) return r;
+    const delayMs = backoffMs[Math.min(done, backoffMs.length - 1)]!;
+    run.append({ type: "step_retrying", stepId: step.id, attempt: run.state().steps[step.id]!.attempt, reason: r.reason, delayMs });
+    const waited = await sleep(delayMs, [runSignal, siblingSignal]);
+    if (!waited) return runSignal.aborted ? { kind: "cancelled" } : r;
+  }
+}
+
+function sleep(ms: number, signals: AbortSignal[]): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (signals.some((s) => s.aborted)) return resolve(false);
+    const done = (ok: boolean) => {
+      clearTimeout(t);
+      for (const s of signals) s.removeEventListener("abort", onAbort);
+      resolve(ok);
+    };
+    const onAbort = () => done(false);
+    const t = setTimeout(() => done(true), ms);
+    for (const s of signals) s.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function runStepAttempt(
   run: RunHandle,
   step: WorkStep,
   deps: EngineDeps,

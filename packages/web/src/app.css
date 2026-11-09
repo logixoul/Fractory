@@ -1,0 +1,56 @@
+:root {
+  color-scheme: light dark;
+  --bg: #fafafa;
+  --fg: #1d1d1f;
+  --muted: #6b6b70;
+  --panel: #ffffff;
+  --border: #dedee3;
+  --accent: #3b5bdb;
+  --ok: #2b8a3e;
+  --warn: #e67700;
+  --bad: #c92a2a;
+  --code: #f1f3f5;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141417;
+    --fg: #e4e4e7;
+    --muted: #9a9aa3;
+    --panel: #1c1c21;
+    --border: #2e2e35;
+    --accent: #748ffc;
+    --code: #24242b;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); }
+main { padding: 16px; max-width: 1600px; margin: 0 auto; }
+a { color: var(--accent); }
+a.ref { text-decoration: underline dotted; }
+button {
+  font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--fg); cursor: pointer;
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+button.danger { border-color: var(--bad); color: var(--bad); }
+button:disabled { opacity: 0.5; cursor: default; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 500; }
+code, pre { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; }
+pre { background: var(--code); padding: 8px; border-radius: 6px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.muted { color: var(--muted); }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; border: 1px solid var(--border); }
+.badge.completed, .badge.done, .badge.pass { color: var(--ok); border-color: var(--ok); }
+.badge.failed, .badge.cancelled, .badge.fail { color: var(--bad); border-color: var(--bad); }
+.badge.running, .badge.active { color: var(--accent); border-color: var(--accent); }
+.badge.paused_quota, .badge.awaiting_approval, .badge.needs_attention { color: var(--warn); border-color: var(--warn); }
+.error { color: var(--bad); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.md :is(h1, h2, h3) { margin: 0.8em 0 0.4em; }
+.md code { background: var(--code); padding: 0 3px; border-radius: 3px; }
+.md pre code { background: none; padding: 0; }

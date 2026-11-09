@@ -36,6 +36,8 @@ export interface WorkerTotals {
   /** true when at least one usage record had no computable cost */
   costUnknown: boolean;
   vendorCostUsd: number;
+  /** "subscription": not metered (Claude Pro); vendorCostUsd is API-equivalent only. */
+  billing?: "metered" | "subscription";
 }
 
 export interface QuotaState {
@@ -71,6 +73,12 @@ export interface RunState {
   cancelRequested: boolean;
   failure?: { stepId?: string; kind: StepFailureKind; reason: string };
   result?: unknown;
+  /** Non-blocking warnings (dirty repo at start, identity tokens in judge diffs, ...). */
+  warnings: { code: string; message: string; stepId?: string }[];
+  /** Automatic transient retries per step id. */
+  retries: Record<string, number>;
+  /** Set once fractory clean/gc removed the run's worktrees (branches are kept). */
+  cleaned?: { at: string; paths: string[] };
 }
 
 function emptyTotals(): WorkerTotals {
@@ -104,6 +112,8 @@ export function reduceInto(state: RunState | null, ev: RunEvent): RunState {
       quotaWarned: [],
       costs: {},
       cancelRequested: false,
+      warnings: [],
+      retries: {},
     };
   }
   const s = state;
@@ -187,8 +197,24 @@ export function reduceInto(state: RunState | null, ev: RunEvent): RunState {
       if (ev.costUsd === null) t.costUnknown = true;
       else t.costUsd += ev.costUsd;
       if (ev.vendorCostUsd !== undefined) t.vendorCostUsd += ev.vendorCostUsd;
+      if (ev.billing !== undefined) t.billing = ev.billing;
       break;
     }
+    case "step_retrying":
+      s.retries[ev.stepId] = (s.retries[ev.stepId] ?? 0) + 1;
+      break;
+    case "retry_requested":
+      // fractory resume --retry-failed: the run continues; the failed step reruns (next attempt).
+      s.status = "running";
+      delete s.failure;
+      delete s.retries[ev.stepId];
+      break;
+    case "warning":
+      s.warnings.push({ code: ev.code, message: ev.message, ...(ev.stepId !== undefined ? { stepId: ev.stepId } : {}) });
+      break;
+    case "worktrees_cleaned":
+      s.cleaned = { at: ev.ts, paths: [...ev.paths] };
+      break;
     case "quota_observed": {
       const q: QuotaState = { status: ev.status, windows: structuredClone(ev.windows), observedAt: ev.ts };
       if (ev.resetsAt !== undefined) q.resetsAt = ev.resetsAt;

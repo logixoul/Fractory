@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Opt-in REAL-MODEL smoke test. Never run by `npm test`. You run it by hand:
-//   npm run build && node scripts/smoke-real.mjs [--claude] [--pi] [--opus]
-// Default: both workers; Claude uses --model haiku (conserve Pro quota), --opus for Opus.
+//   npm run build && node scripts/smoke-real.mjs [--claude] [--pi] [--glm] [--opus]
+// Default: all three (Claude, DeepSeek and the GLM-5.3 judge via Pi); Claude uses --model haiku (conserve Pro quota), --opus for Opus.
 // Pi needs TOGETHER_API_KEY in .dev.vars (repo root). Cost: one tiny call per worker.
 //
 // Each worker gets a read-only task in a fresh worktree of a scratch repo, with a sibling
@@ -30,7 +30,8 @@ import {
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const argv = new Set(process.argv.slice(2));
-const want = { claude: argv.has("--claude") || !argv.has("--pi"), pi: argv.has("--pi") || !argv.has("--claude") };
+const any = ["--claude", "--pi", "--glm"].some((f) => argv.has(f));
+const want = { claude: argv.has("--claude") || !any, pi: argv.has("--pi") || !any, glm: argv.has("--glm") || !any };
 const SECRET = "ZEBRA-PLUM-4471";
 
 const scratch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "fractory-smoke-")));
@@ -104,6 +105,16 @@ if (want.pi) {
   } else {
     const cfg = PiWorkerConfig.parse({ kind: "pi", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017", thinking: "off" });
     await smoke("pi", new PiWorker("pi", cfg, { redactor, secretEnv, agentDir: path.join(data, "pi-agent"), sessionDir: path.join(data, "pi-sessions") }));
+  }
+}
+if (want.glm) {
+  if (!secretEnv.TOGETHER_API_KEY) {
+    console.log("\n== glm skipped: no TOGETHER_API_KEY in .dev.vars");
+  } else {
+    // The default judge (a third model family). Together's model page showed a "launching soon"
+    // banner when this was written: this call verifies the endpoint is live.
+    const cfg = PiWorkerConfig.parse({ kind: "pi", model: "zai-org/GLM-5.3", thinking: "high" });
+    await smoke("glm", new PiWorker("glm", cfg, { redactor, secretEnv, agentDir: path.join(data, "pi-agent"), sessionDir: path.join(data, "pi-sessions") }));
   }
 }
 console.log(`\nscratch: ${scratch}`);

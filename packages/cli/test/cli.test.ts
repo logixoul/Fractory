@@ -135,19 +135,29 @@ describe("fractory CLI", () => {
     expect(JSON.parse(s.out.join("")).status).toBe("cancelled");
   });
 
-  it("serve: prints the tokened GUI URL, opens it, answers on 127.0.0.1, stops on abort", async () => {
+  it("serve: prints a single-use GUI link, opens it, Enter gives a new one, stops on abort", async () => {
     const ac = new AbortController();
     const opened: string[] = [];
-    const t = io({ signal: ac.signal, openBrowser: (u) => opened.push(u) });
+    let typeLine: (() => void) | undefined;
+    const t = io({ signal: ac.signal, openBrowser: (u) => opened.push(u), stdinLines: (f) => (typeLine = f) });
     const done = runCli(["serve", "--port", "0"], t.io);
     for (let i = 0; i < 200 && !t.out.join("").includes("GUI:"); i++) await new Promise((r) => setTimeout(r, 10));
     const gui = /GUI: (\S+)/.exec(t.out.join(""))![1]!;
-    expect(gui).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/\?token=[\w-]{43,}$/);
+    expect(gui).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/auth\?code=[\w-]{32,}$/);
+    expect(t.out.join("")).not.toMatch(/token=/);
     expect(opened).toEqual([gui]);
     const u = new URL(gui);
-    const health = await fetch(`${u.origin}/api/health`, { headers: { authorization: `Bearer ${u.searchParams.get("token")}` } });
-    expect(health.status).toBe(200);
+    const login = await fetch(gui, { redirect: "manual" });
+    expect(login.status).toBe(303);
+    const cookie = login.headers.get("set-cookie")!.split(";")[0]!;
+    expect((await fetch(`${u.origin}/api/health`, { headers: { cookie } })).status).toBe(200);
     expect((await fetch(`${u.origin}/api/health`)).status).toBe(401);
+    expect((await fetch(gui, { redirect: "manual" })).status).toBe(401); // single use
+    typeLine!();
+    const links = [...t.out.join("").matchAll(/GUI: (\S+)/g)].map((m) => m[1]);
+    expect(links).toHaveLength(2);
+    expect(opened).toHaveLength(2);
+    expect((await fetch(links[1]!, { redirect: "manual" })).status).toBe(303);
     ac.abort();
     expect(await done).toBe(EXIT.ok);
     await expect(fetch(`${u.origin}/api/health`)).rejects.toThrow();

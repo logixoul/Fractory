@@ -12,7 +12,9 @@ import { leakCheck, relativizePaths, scrubProse } from "../text/anonymize.js";
 import { loadProjectContext } from "../text/context.js";
 import { checkRefs } from "../text/refs.js";
 import { randomHex, seededShuffle } from "../util/random.js";
-import { copyInput, judgeScrubber, promptText, res, sha256, writeOut } from "./common.js";
+import { copyInput, judgeScrubber, labelsOf, promptText, res, runSwapPass, sha256, writeOut } from "./common.js";
+
+const sameLabels = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
 /**
  * Consensus workflow (spec "Workflow 1"), all phases read-only:
@@ -309,15 +311,19 @@ function judgeStep(env: ConsensusEnv, st: RunState, setup: SetupResult): WorkSte
         replacements += s.replacements;
         return s.text;
       };
-      const files = {
-        task: copyInput(ctx, "task.md", path.join(ctx.run.dir, "prompt.md"), clean),
-        A: copyInput(ctx, "proposal-A.md", currentProposal(st, la).file, clean),
-        B: copyInput(ctx, "proposal-B.md", currentProposal(st, lb).file, clean),
-        critA: copyInput(ctx, "critique-by-A.md", res<TextStepResult>(st, `critique.${la}`)!.file, clean),
-        critB: copyInput(ctx, "critique-by-B.md", res<TextStepResult>(st, `critique.${lb}`)!.file, clean),
-      };
+      // The user's own task text is passed verbatim: exempt from scrub and leak check.
+      const taskFile = copyInput(ctx, "task.md", path.join(ctx.run.dir, "prompt.md"));
+      const sideFiles = (prefix: string, a: string, b: string) => ({
+        A: copyInput(ctx, `${prefix}proposal-A.md`, currentProposal(st, a).file, clean),
+        B: copyInput(ctx, `${prefix}proposal-B.md`, currentProposal(st, b).file, clean),
+        critA: copyInput(ctx, `${prefix}critique-by-A.md`, res<TextStepResult>(st, `critique.${a}`)!.file, clean),
+        critB: copyInput(ctx, `${prefix}critique-by-B.md`, res<TextStepResult>(st, `critique.${b}`)!.file, clean),
+      });
+      const files = { task: taskFile, ...sideFiles("", la, lb) };
+      // Swap pass inputs must exist before the step's inputs/ baseline is taken (§8.19).
+      const swapped = cfg.judge.swapOrderPass ? sideFiles("swap/", lb, la) : undefined;
       const forbidden = [env.dataDir, ...roots];
-      for (const f of Object.values(files)) {
+      for (const f of [files.A, files.B, files.critA, files.critB, ...(swapped ? Object.values(swapped) : [])]) {
         const hits = leakCheck(fs.readFileSync(f, "utf8"), scrubber, forbidden);
         if (hits.length > 0) throw new StepFailure("integrity", `anonymization leak check failed for ${path.basename(f)}: ${hits.length} pattern(s) still match`);
       }
@@ -353,8 +359,27 @@ function judgeStep(env: ConsensusEnv, st: RunState, setup: SetupResult): WorkSte
           bad = invalidEvidence(r.value, cwd, roots);
         }
         if (bad.undecided.length > 0) throw new StepFailure("exit_check", `judge decisions without valid evidence: ${bad.undecided.join("; ")}`);
-        const decisionJson = writeOut(ctx, "decision.json", JSON.stringify({ verdict: r.value, sides, invalidEvidence: bad.invalid }, null, 2) + "\n");
-        const decisionMd = writeOut(ctx, "decision.md", renderDecision(r.value, sides, bad.invalid));
+        let verdict = r.value;
+        let dropped: ConsensusVerdict["decisions"] = [];
+        if (swapped) {
+          // Second pass with A/B swapped (fresh session); keep decisions both passes attribute alike.
+          const ratings = await runSwapPass(ctx, {
+            judgeId,
+            cwd,
+            timeoutMs: cfg.timeouts.judgeMs,
+            fileList: [`- task: ${files.task}`, `- proposal A: ${swapped.A}`, `- proposal B: ${swapped.B}`, `- A's critique of B: ${swapped.critA}`, `- B's critique of A: ${swapped.critB}`].join("\n"),
+            points: verdict.decisions.map((d, i) => ({ index: i + 1, text: `${d.topic}: ${d.decision}` })),
+          });
+          const keep = verdict.decisions.filter((d, i) => {
+            const second = ratings.get(i + 1);
+            return second !== undefined && sameLabels(labelsOf(d.basedOn, la, lb), labelsOf(second, lb, la));
+          });
+          dropped = verdict.decisions.filter((d) => !keep.includes(d));
+          if (keep.length === 0) throw new StepFailure("exit_check", "the swapped-order judge pass agreed with none of the decisions");
+          verdict = { ...verdict, decisions: keep };
+        }
+        const decisionJson = writeOut(ctx, "decision.json", JSON.stringify({ verdict, sides, invalidEvidence: bad.invalid, droppedBySwapPass: dropped }, null, 2) + "\n");
+        const decisionMd = writeOut(ctx, "decision.md", renderDecision(verdict, sides, bad.invalid, dropped));
         return { decisionJson, decisionMd, sides, scrubReplacements: replacements, invalidEvidence: bad.invalid } satisfies JudgeResult;
       });
     },
@@ -377,7 +402,7 @@ function invalidEvidence(v: ConsensusVerdict, root: string, roots: string[]) {
   return { invalid, undecided };
 }
 
-export function renderDecision(v: ConsensusVerdict, sides: JudgeResult["sides"], invalid: string[]): string {
+export function renderDecision(v: ConsensusVerdict, sides: JudgeResult["sides"], invalid: string[], dropped: ConsensusVerdict["decisions"] = []): string {
   const side = (s: string) => (s === "A" || s === "B" ? `${s} (${sides[s].workerId})` : s);
   const out = [
     "# Decision",
@@ -395,6 +420,10 @@ export function renderDecision(v: ConsensusVerdict, sides: JudgeResult["sides"],
   out.push("## Unresolved disagreements", "");
   if (v.unresolved.length === 0) out.push("None.", "");
   for (const u of v.unresolved) out.push(`- **${u.topic}**: A: ${u.positionA} / B: ${u.positionB}. ${u.whyUnresolved}`);
+  if (dropped.length) {
+    out.push("", "## Dropped by the swapped-order pass", "", "The judge rated these differently when A and B were swapped, so they are not decisions:", "");
+    for (const d of dropped) out.push(`- **${d.topic}**: ${d.decision}`);
+  }
   if (invalid.length) out.push("", `> ${invalid.length} cited reference(s) could not be validated: ${invalid.slice(0, 30).map((e) => `\`${e}\``).join(", ")}`);
   return out.join("\n") + "\n";
 }
