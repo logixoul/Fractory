@@ -103,7 +103,13 @@ export const Config = z
         minRefs: z.number().int().min(0).default(3),
       })
       .prefault({}),
-    duel: z.object({ maxFixIterations: z.number().int().min(0).max(10).default(2) }).prefault({}),
+    duel: z
+      .object({
+        maxFixIterations: z.number().int().min(0).max(10).default(2),
+        /** Contestant whose session applies the approved items (spec: Opus). Default: the first contestant. */
+        applyWorker: z.string().optional(),
+      })
+      .prefault({}),
     timeouts: z
       .object({
         workerMs: z.number().int().positive().default(30 * MIN),
@@ -125,6 +131,9 @@ export const Config = z
     });
     if (c.roles.contestants[0] === c.roles.contestants[1]) {
       ctx.addIssue({ code: "custom", path: ["roles", "contestants"], message: "contestants must be two different workers" });
+    }
+    if (c.duel.applyWorker !== undefined && !c.roles.contestants.includes(c.duel.applyWorker)) {
+      ctx.addIssue({ code: "custom", path: ["duel", "applyWorker"], message: `must be one of the contestants (${c.roles.contestants.join(", ")})` });
     }
     if (!ids.has(c.roles.judge)) ctx.addIssue({ code: "custom", path: ["roles", "judge"], message: `unknown worker '${c.roles.judge}'` });
     c.anonymize.patterns.forEach((p, i) => {

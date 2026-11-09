@@ -13,6 +13,7 @@ import type { RunHandle, RunStore } from "../store/run-store.js";
 import { newLabels, randomSeed } from "../util/random.js";
 import type { Worker } from "../workers/types.js";
 import { consensusWorkflow } from "../workflows/consensus.js";
+import { duelWorkflow } from "../workflows/duel.js";
 
 export interface CreateRunOptions {
   workflow: Exclude<Workflow, "test">;
@@ -58,6 +59,8 @@ export function workflowFor(st: RunState, dataDir: string): WorkflowDef {
   switch (st.workflow) {
     case "consensus":
       return consensusWorkflow({ dataDir });
+    case "duel":
+      return duelWorkflow({ dataDir });
     default:
       throw new Error(`workflow '${st.workflow}' is not available yet`);
   }

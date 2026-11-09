@@ -22,7 +22,7 @@ import {
   type RunState,
   type Worker,
 } from "@fractory/core";
-import { formatEvent, formatRunList, formatShow } from "./format.js";
+import { formatEvent, formatItem, formatRunList, formatShow } from "./format.js";
 
 export interface CliIo {
   out(text: string): void;
@@ -100,14 +100,13 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         const repo = path.resolve(o.repo);
         const loaded = loadConfig({ repo, configDir: c.configDir });
         for (const w of loaded.warnings) io.err(`warning: ${w}\n`);
-        if (workflow === "duel") throw new UserError("the duel workflow arrives in milestone M4");
         const run = await createRun(c.store, { workflow, repo, promptFile: path.resolve(o.prompt), config: loaded.config });
         io.out(`run ${run.runId} (${workflow}) created; config from: ${loaded.sources.join(", ") || "built-in defaults"}\n`);
         code = await driveAndReport(run, c, false);
       });
 
   startCmd("consensus", "proposals → cross-critique → revisions → anonymized judge (read-only)");
-  startCmd("duel", "two independent implementations → checks → judge → approval → apply (M4)");
+  startCmd("duel", "two independent implementations → checks → judge → approval → apply (never merges or pushes)");
 
   program
     .command("runs")
@@ -194,7 +193,7 @@ function nextHint(st: RunState): string {
     case "paused_quota":
       return `\nrun ${st.runId} paused: quota exhausted for ${st.pause?.workerId}${st.pause?.resetsAt ? `, resets at ${new Date(st.pause.resetsAt).toLocaleString()}` : ""}. Resume with: fractory resume ${st.runId}\n`;
     case "awaiting_approval":
-      return `\nrun ${st.runId} awaits approval. Inspect: fractory show ${st.runId}; approve: fractory approve ${st.runId} --items 1,2\n`;
+      return `\nrun ${st.runId} awaits approval of these items:\n${(st.approval?.items ?? []).map((it, i) => formatItem(it, i + 1)).join("\n")}\n\nApprove a subset: fractory approve ${st.runId} --items 1,3   (then: fractory resume ${st.runId})\n`;
     case "needs_attention":
       return `\nrun ${st.runId} needs attention: the main repository changed during a step (${st.attention?.changes.map((c) => c.path).join(", ")}).\nContinue: fractory resume ${st.runId}   Abort: fractory cancel ${st.runId}\n`;
     case "failed":
@@ -205,6 +204,10 @@ function nextHint(st: RunState): string {
 }
 
 function resultLine(st: RunState): string {
-  const r = st.result as { decisionMd?: string } | undefined;
-  return r?.decisionMd ? `\ndecision: ${r.decisionMd}` : "";
+  const r = st.result as { decisionMd?: string; reportMd?: string; branches?: Record<string, string> } | undefined;
+  const lines: string[] = [];
+  if (r?.decisionMd) lines.push(`decision: ${r.decisionMd}`);
+  if (r?.reportMd) lines.push(`report: ${r.reportMd}`);
+  if (r?.branches) lines.push(`branches (not merged or pushed): ${Object.values(r.branches).join(", ")}`);
+  return lines.map((l) => `\n${l}`).join("");
 }

@@ -91,6 +91,36 @@ describe("fractory CLI", () => {
     expect(s.out.join("")).toContain("judge");
   });
 
+  it("duel pauses for approval (exit 2), then approve + resume completes and prints the branches", async () => {
+    const r = repo();
+    const prompt = path.join(tmp(), "p.md");
+    fs.writeFileSync(prompt, "Add div.\n");
+    const duelVerdict = { summary: "s", items: [{ aspect: "a", betterSide: "A", evidence: ["math.js:1"], recommendation: "keep", risk: "" }] };
+    const workers = (config: Config) =>
+      Object.fromEntries(
+        Object.keys(config.workers).map((id) => [
+          id,
+          new FakeWorker(id, (task: WorkerTask) =>
+            task.outFile?.endsWith("verdict.json")
+              ? { structured: duelVerdict }
+              : { actions: [{ writeFile: { path: "math.js", content: `export const div = (a, b) => a / b; // ${id}\n` } }], finalText: "done" },
+          ),
+        ]),
+      );
+    const t = io({ workers });
+    expect(await runCli(["duel", "--repo", r, "--prompt", prompt], t.io)).toBe(EXIT.paused);
+    const text = t.out.join("");
+    expect(text).toContain("awaits approval of these items");
+    expect(text).toMatch(/1\. a: better A \((opus|deepseek)\)/);
+    const runId = /run (\S+) \(duel\)/.exec(text)![1]!;
+
+    const a = io({ env: t.io.env, workers });
+    expect(await runCli(["approve", runId, "--items", "1"], a.io)).toBe(0);
+    const res = io({ env: t.io.env, workers });
+    expect(await runCli(["resume", runId], res.io)).toBe(EXIT.ok);
+    expect(res.out.join("")).toMatch(/branches \(not merged or pushed\): fractory\/\S+, fractory\/\S+/);
+  });
+
   it("cancel via signal stops the run (exit 1) and resume of a cancelled run is a no-op", async () => {
     const r = repo();
     const prompt = path.join(tmp(), "p.md");
@@ -110,7 +140,7 @@ describe("fractory CLI", () => {
     expect(await runCli(["show", "20260101-000000-zzzz"], t.io)).toBe(EXIT.failed);
     expect(t.err.join("")).toMatch(/^error: /);
     expect(await runCli(["consensus", "--repo", tmp(), "--prompt", "nope.md"], t.io)).toBe(EXIT.failed);
-    expect(await runCli(["duel", "--repo", repo(), "--prompt", "x"], t.io)).toBe(EXIT.failed);
+    expect(await runCli(["duel", "--repo", repo(), "--prompt", "missing.md"], t.io)).toBe(EXIT.failed);
     expect(await runCli(["bogus"], t.io)).toBe(EXIT.usage);
     expect(await runCli(["approve", "20260101-000000-aaaa", "--items", "x"], t.io)).toBe(EXIT.failed);
   });

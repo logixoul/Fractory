@@ -52,3 +52,5 @@ export * from "./engine/structured.js";
 export * from "./engine/gated.js";
 export * from "./workflows/consensus.js";
 export * from "./run/runs.js";
+export * from "./workflows/common.js";
+export * from "./workflows/duel.js";

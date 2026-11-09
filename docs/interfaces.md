@@ -279,6 +279,7 @@ Note: Pi refused to repeat markers labelled "canary token" ("leak-detection mark
 - **Spikes use `--model haiku`** for Claude from now on (recorded in CLAUDE.md). The opt-in smoke script defaults to haiku as well, with `--model opus` behind a flag.
 
 ## 9. Open caveats
+- Parallel edit stages (duel implement/fix): a write into the sibling worktree is indistinguishable from the sibling's own edits by snapshots; isolation there relies on harness confinement (Pi guard, Claude cwd confinement). See docs/decisions-todo.md M4.
 - Claude quota-rejected payload not observed live (§1).
 - Path-guard residual: recursive tools may follow links inside an allowed dir (§2). Mitigated by the snapshot symlink check (§8.13).
 - Snapshot blind spots for excluded dirs and oversized ignored files (§8.13).

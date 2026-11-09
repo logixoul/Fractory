@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { withGates, type GateSpec } from "../engine/gated.js";
@@ -9,10 +8,11 @@ import { revParse } from "../git/git.js";
 import { ensureWorktree } from "../git/worktree.js";
 import { ConsensusVerdict, ReviseResult } from "../schemas/outputs.js";
 import type { RunState } from "../state/reducer.js";
-import { buildScrubber, leakCheck, relativizePaths, scrubProse } from "../text/anonymize.js";
+import { leakCheck, relativizePaths, scrubProse } from "../text/anonymize.js";
 import { loadProjectContext } from "../text/context.js";
 import { checkRefs } from "../text/refs.js";
 import { randomHex, seededShuffle } from "../util/random.js";
+import { copyInput, judgeScrubber, promptText, res, sha256, writeOut } from "./common.js";
 
 /**
  * Consensus workflow (spec "Workflow 1"), all phases read-only:
@@ -54,26 +54,6 @@ export interface JudgeResult {
   sides: Record<"A" | "B", { label: string; workerId: string }>;
   scrubReplacements: number;
   invalidEvidence: string[];
-}
-
-const res = <T>(st: RunState, id: string): T | undefined =>
-  st.steps[id]?.status === "completed" ? (st.steps[id]!.result as T) : undefined;
-
-const sha = (s: string) => createHash("sha256").update(s).digest("hex");
-
-function writeOut(ctx: StepContext, name: string, text: string): string {
-  const f = path.join(ctx.stepDir, "out", name);
-  fs.mkdirSync(path.dirname(f), { recursive: true });
-  fs.writeFileSync(f, text);
-  return f;
-}
-
-function copyInput(ctx: StepContext, name: string, from: string, transform?: (s: string) => string): string {
-  const f = path.join(ctx.stepDir, "inputs", name);
-  fs.mkdirSync(path.dirname(f), { recursive: true });
-  const text = fs.readFileSync(from, "utf8");
-  fs.writeFileSync(f, transform ? transform(text) : text);
-  return f;
 }
 
 export function consensusWorkflow(env: ConsensusEnv): WorkflowDef {
@@ -125,10 +105,6 @@ function sessionOf(st: RunState, label: string): string {
     if (!r) return s;
     s = r.sessionId;
   }
-}
-
-function promptText(runDir: string): string {
-  return fs.readFileSync(path.join(runDir, "prompt.md"), "utf8");
 }
 
 function setupStep(env: ConsensusEnv, st: RunState): WorkStep {
@@ -190,7 +166,7 @@ async function textTurn(
     refs = checkRefs(done.finalText, o.cwd, o.roots);
   }
   const file = writeOut(ctx, o.outName, done.finalText);
-  return { sessionId: done.sessionId, file, sha256: sha(done.finalText), validRefs: refs.valid.length, invalidRefs: refs.invalid.map((r) => r.raw) };
+  return { sessionId: done.sessionId, file, sha256: sha256(done.finalText), validRefs: refs.valid.length, invalidRefs: refs.invalid.map((r) => r.raw) };
 }
 
 function textExit(min: number) {
@@ -298,7 +274,7 @@ function reviseStep(env: ConsensusEnv, st: RunState, setup: SetupResult, label: 
         return {
           sessionId: r.done.sessionId,
           file,
-          sha256: sha(r.value.proposal),
+          sha256: sha256(r.value.proposal),
           validRefs: refs.valid.length,
           invalidRefs: refs.invalid.map((x) => x.raw),
           noChanges: false,
@@ -325,12 +301,7 @@ function judgeStep(env: ConsensusEnv, st: RunState, setup: SetupResult): WorkSte
       const [la, lb] = seededShuffle(labels, st.seed) as [string, string];
       const sides = { A: { label: la, workerId: st.labels[la]! }, B: { label: lb, workerId: st.labels[lb]! } };
 
-      const modelIds = [
-        ...Object.keys(cfg.workers),
-        ...Object.values(cfg.workers).flatMap((w) => ("model" in w ? [w.model] : [])),
-        ...Object.values(st.steps).flatMap((s) => s.resolvedModels ?? []),
-      ];
-      const scrubber = buildScrubber(cfg.anonymize.patterns, modelIds, cfg.anonymize.replacement);
+      const scrubber = judgeScrubber(ctx, st);
       const roots = [...Object.values(setup.worktrees), st.repo];
       let replacements = 0;
       const clean = (text: string) => {

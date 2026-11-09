@@ -93,3 +93,29 @@ Binding requirements you already set (docs/interfaces.md §8) are not repeated h
 - [ ] **`approve` only records the approval; a separate `resume` continues the run.** The GUI can do both in one click.
 - [ ] **Parallel steps that see the same main-repo change report it once** in `needs_attention`.
 - [ ] **vitest's per-test timeout is now 60 s.** End-to-end consensus tests with real git take 4–8 s each on Windows.
+
+## M4: duel workflow, approve and resume
+
+- [ ] **Limitation: during the parallel implement/fix stages, a write into the *other* contestant's worktree can't be told apart from that contestant's own edits.** Each step's snapshot gate ignores the sibling's worktree, because the sibling is allowed to change it at the same time.
+  - In this stage, isolation relies on the harness confinement verified in M0/M2 and by the smoke test: the Pi path guard and Claude's cwd confinement.
+  - Outside the parallel stages (judge, apply, recheck), a cross-worktree write fails the step hard and the worktree is restored; there's a test for this.
+  - *Alternatives:* run implement steps one after the other (slower, but fully attributable), or compare each change against the worker's own tool calls.
+- [ ] **Each contestant's chain moves at its own pace.** The pattern is implement → check.0 → [fix.i → check.i …], running until checks pass or `maxFixIterations` (default 2) is used up. One contestant can be fixing while the other is already done. The judge starts when both chains have finished.
+- [ ] **A contestant whose checks still fail after the last fix isn't eliminated.** It goes to the judge with its failing check results.
+- [ ] **An implementation with no changes against the base fails the run** (`exit_check`). Fix steps have no such check.
+- [ ] **What the judge sees in a duel:** the scrubbed task, both squashed diffs (verbatim), and both final check results (table plus log tails of failed checks, with paths made repo-relative).
+  - It doesn't see the workers' own change summaries, since those are prose that would need scrubbing.
+  - Code comments like "Written by Claude" do reach the judge, because code is never rewritten (§8.16).
+- [ ] **Check logs get only the path leak check, not the name scrub.** They're tool output, not prose.
+- [ ] **Each judge item needs at least one evidence ref that resolves in either side's final worktree or the base**, with one repair turn otherwise.
+- [ ] **`duel.applyWorker` is a new config option**, defaulting to the first contestant (`opus`). It names whose session applies the approved items; it must be a contestant. Its branch gets the apply commit.
+- [ ] **The apply worker resumes its own session and gets two input files.**
+  - The approved items, with A/B rewritten as "yours" / "the other implementation".
+  - An excerpt of the other side's diff: only the sections for files cited by approved items where the other side was better. If none match, the full diff.
+- [ ] **With zero approved items, apply and recheck are skipped** and the report says so.
+- [ ] **Recheck runs the checks once after apply**, with no fix loop after it. Failures are only reported.
+- [ ] **Edit-step retries reuse the step's first checkpoint.** On a retry after a quota pause or crash, the worktree is restored to the original checkpoint (setup reruns if the clean removed anything), and no second checkpoint commit is made.
+- [ ] **Check steps don't use the full snapshot gate.** They run no worker; the check runner verifies their own worktree (§8.18). A retried check step first restores to the post-step commit.
+- [ ] **Per-repo `setup` runs once per contestant worktree at duel setup**, and again after any clean that removed files. The judge worktree gets no setup.
+- [ ] **`report.md` is written by the orchestrator.** It covers branches, heads, files changed, fix iterations and check status per side; the judge summary and items with approved ones ticked; the apply worker's summary; and the recheck results.
+- [ ] **CLI:** a duel that pauses for approval exits with code 2 and prints the items. `fractory approve <id> --items 1,3` then `fractory resume <id>` finish it. The final output lists the branches, which are never merged or pushed.

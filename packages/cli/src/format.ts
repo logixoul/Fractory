@@ -85,9 +85,21 @@ export function formatShow(st: RunState): string {
   }
   if (st.approval) {
     out.push("", `approval (${st.approval.stepId}): ${st.approval.approvedItemIds === null ? "pending" : `approved [${st.approval.approvedItemIds.join(", ")}]`}`);
-    st.approval.items.forEach((it, i) => out.push(`  ${i + 1}. ${JSON.stringify(it)}`));
+    st.approval.items.forEach((it, i) => out.push(formatItem(it, i + 1)));
   }
   if (st.failure) out.push("", `failure (${st.failure.kind}) at ${st.failure.stepId ?? "?"}: ${st.failure.reason}`);
   if (st.result !== undefined) out.push("", `result: ${JSON.stringify(st.result, null, 2)}`);
   return out.join("\n") + "\n";
+}
+
+/** A judge item for the approval prompt (duel items have aspect/betterSide/recommendation). */
+export function formatItem(it: unknown, n: number): string {
+  const o = it as { aspect?: string; betterSide?: string; betterWorker?: string; recommendation?: string; risk?: string; evidence?: string[] };
+  if (typeof o?.aspect !== "string") return `  ${n}. ${JSON.stringify(it)}`;
+  return [
+    `  ${n}. ${o.aspect}: better ${o.betterSide} (${o.betterWorker})`,
+    `     → ${o.recommendation}`,
+    ...(o.risk ? [`     risk: ${o.risk}`] : []),
+    ...(o.evidence?.length ? [`     evidence: ${o.evidence.join(", ")}`] : []),
+  ].join("\n");
 }
