@@ -3,9 +3,9 @@
 A local orchestrator that runs two coding agents from different model families on your repository, under a deterministic control plane:
 
 - **Opus** through Claude Code, on your Claude Pro subscription (no Anthropic API key).
-- **DeepSeek V4.1 Flash** through the Pi coding agent, on Together AI.
+- **DeepSeek V4.1 Flash** (Baseten's "Fast" variant) through the Pi coding agent, on Baseten.
 
-The default judge is **GLM-5.3** (Together, via Pi), a third model family.
+The default judge is **GLM-5.3 Flash** (Baseten, via Pi), a third model family. Every model call uses medium reasoning by default.
 
 It has two workflows:
 
@@ -21,7 +21,7 @@ the Linux and macOS CI jobs have not yet been verified.
 
 - **Node.js 22.19 or newer** and **git**.
 - **Claude Code** (`claude`), logged in with your Pro subscription. fractory never uses `--bare` or an API key. It removes `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` from Claude's environment, and refuses to run unless Claude reports the subscription login.
-- **Pi** (`npm install -g @earendil-works/pi-coding-agent`) and a **Together AI API key** (`TOGETHER_API_KEY`).
+- **Pi** (`npm install -g @earendil-works/pi-coding-agent`) and a **Baseten API key** (`BASETEN_API_KEY`). Baseten is one of Pi's built-in providers.
 - For the GUI: any current browser.
 
 ## Install
@@ -51,7 +51,7 @@ fractory merges, in increasing order of precedence: built-in defaults, the **glo
 Override them with `FRACTORY_CONFIG_DIR` / `FRACTORY_DATA_DIR`, or `--config-dir` / `--data-dir`.
 On Linux, `XDG_CONFIG_HOME` and `XDG_DATA_HOME` replace the respective default parent directories.
 
-The Together key comes either from your shell environment (`TOGETHER_API_KEY`) or from a dotenv file named by `envFile`. A relative `envFile` path is resolved against the config file that declares it. Only Pi gets the key; it never reaches Claude, your checks, or any log.
+The Baseten key comes either from your shell environment (`BASETEN_API_KEY`) or from a dotenv file named by `envFile`. A relative `envFile` path is resolved against the config file that declares it. Only Pi gets the key; it never reaches Claude, your checks, or any log.
 
 A typical global config:
 
@@ -79,17 +79,17 @@ Other options you may want:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `workers.opus` | `{ "kind": "claude", "model": "opus", "effort": "high" }` | Claude worker |
-| `workers.deepseek` | `{ "kind": "pi", "provider": "together", "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "thinking": "high" }` | Pi worker |
-| `workers.glm` | `{ "kind": "pi", "model": "zai-org/GLM-5.3", … }` | Pi worker used as judge |
+| `workers.opus` | `{ "kind": "claude", "model": "opus", "effort": "medium" }` | Claude worker |
+| `workers.deepseek` | `{ "kind": "pi", "provider": "baseten", "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast", "thinking": "medium" }` | Pi worker |
+| `workers.glm` | `{ "kind": "pi", "provider": "baseten", "model": "zai-org/GLM-5.3-Flash", "thinking": "medium" }` | Pi worker used as judge |
 | `roles` | `{ "contestants": ["opus", "deepseek"], "judge": "glm" }` | who competes, who judges |
 | `consensus` | `{ "maxRounds": 1, "minRefs": 3 }` | revision rounds; required `path:line` refs per proposal |
 | `judge.swapOrderPass` | `false` | judge a second time with A/B swapped; keep only what both passes agree on |
 | `duel.applyWorker` | first contestant | whose session applies the approved items |
-| `retry` | `{ "transientMaxRetries": 2, "backoffMs": [5000, 30000] }` | automatic retries of 5xx / network / Together 429 errors |
+| `retry` | `{ "transientMaxRetries": 2, "backoffMs": [5000, 30000] }` | automatic retries of 5xx / network / provider 429 errors (Pi) |
 | `quota` | `{ "warnUtilization": 0.8 }` | warn when the last known Claude 5-hour or 7-day usage is above this |
 | `timeouts` | `{ "workerMs": 1800000, "judgeMs": 1200000 }` | per worker call |
-| `prices` | Together prices for DeepSeek and GLM | USD per 1M tokens; cost is computed by fractory |
+| `prices` | Baseten prices for DeepSeek Fast and GLM-5.3 Flash | USD per 1M tokens, keyed `provider/model`; cost is computed by fractory |
 | `contextFiles` | `["AGENTS.md", "CLAUDE.md"]` | repo files injected into both agents' prompts, identically |
 
 Commands in `setup` and `checks` are argument arrays, never shell strings. They get no secret-looking environment variables; pass what they need in their `env`.
@@ -143,7 +143,7 @@ The daemon only listens on `127.0.0.1`. It needs a per-launch token on every req
 Automated tests never call a model. To check your setup end to end (one tiny call per worker; Claude uses `haiku`):
 
 ```sh
-npm run smoke                 # Claude, DeepSeek and the GLM judge
+npm run smoke                 # Claude, DeepSeek and the GLM-5.3 Flash judge
 npm run smoke -- --pi         # only DeepSeek
 npm run smoke -- --opus       # use Opus instead of haiku
 ```

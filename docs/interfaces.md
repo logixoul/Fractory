@@ -177,6 +177,19 @@ Residual: recursive `grep`/`find` on an allowed dir may traverse a symlink insid
 - JSONL framing: split on `\n` only (strip a trailing `\r`), **not** Node `readline`, which also splits on U+2028/U+2029 inside JSON strings.
 - Windows: Pi's `bash` tool uses Git Bash. The `powershell` tool is Windows-only. Both are excluded by our explicit `--tools` allowlists.
 
+### Provider switch to Baseten (2026-11-09, by user request)
+The spec named Together; the default provider is now **Baseten**. Everything above was verified on Together. Baseten is a different backend behind the same Pi interface, so the invocation, guard, stream parsing and gates are unchanged.
+
+| | Status |
+|---|---|
+| Pi provider id `baseten`, key env `BASETEN_API_KEY` | verified: `pi --list-models baseten` lists the catalog once the key is set |
+| Model ids `deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast` (contestant), `zai-org/GLM-5.3-Flash` (judge) | verified in Pi's catalog and in Baseten's `GET https://inference.baseten.co/v1/models` |
+| Prices, USD per 1M (from `/v1/models` `pricing`) | DeepSeek V4.1 Flash 1017 Fast: input 0.60, output 2.40, cache read 0.014. GLM-5.3 Flash: input 0.15, output 0.50, cache read 0.03. No cache-write price listed. |
+| "Fast" variants | Baseten docs: same weights, dedicated capacity for higher throughput, separate price (2× here) and rate limits; falls back to base capacity when Fast capacity is unavailable |
+| Stream shape, `usage`, `message_end.provider` = `baseten`, `stopReason: "error"` on failures | **not yet verified with a real call.** Run `npm run smoke -- --pi --glm` |
+| Effective reasoning for `thinking: "medium"` | **not yet verified.** On Together only `off`/`high` were effective. Each step logs `message_end.thinkingLevel`, and the smoke output prints `effectiveReasoning`. |
+| Rate limits | Baseten tiers (docs): Basic 15–120 RPM / 100k–500k TPM, Pro 120 RPM / 1M TPM. A 429 from a Pi provider is transient (retried with backoff). |
+
 ---
 
 ## 3. Process lifecycle (verified on Windows)

@@ -99,7 +99,7 @@ export type ErrorClass = "quota" | "transient" | "auth" | "model";
  * Classifies a vendor error. Only ever applied to an error result (Claude is_error === true,
  * Pi stopReason=error): successful model output is never text-matched.
  *  - Claude: 429 / usage-limit text = Pro quota (pause, never retried).
- *  - Pi/Together: 429 = provider rate limit, transient (retried with backoff).
+ *  - Pi (Baseten, Together, …): 429 = provider rate limit, transient (retried with backoff).
  *  - 5xx / overloaded / network = transient.
  */
 export function classifyError(message: string, o: { status?: number | null; vendor: "claude" | "pi" }): ErrorClass {

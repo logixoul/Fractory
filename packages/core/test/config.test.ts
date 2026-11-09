@@ -18,15 +18,24 @@ describe("loadConfig", () => {
     const { config, sources, warnings } = loadConfig({ configDir, repo });
     expect(sources).toEqual([]);
     expect(warnings).toEqual([]);
-    expect(config.workers.opus).toMatchObject({ kind: "claude", model: "opus", effort: "high", command: "claude" });
-    expect(config.workers.deepseek).toMatchObject({ kind: "pi", provider: "together", thinking: "high" });
-    // default judge: a third model family, not a contestant
+    // every LLM call defaults to medium reasoning
+    expect(config.workers.opus).toMatchObject({ kind: "claude", model: "opus", effort: "medium", command: "claude" });
+    // Baseten; DeepSeek's "Fast" variant
+    expect(config.workers.deepseek).toMatchObject({
+      kind: "pi",
+      provider: "baseten",
+      model: "deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast",
+      thinking: "medium",
+      passEnv: ["BASETEN_API_KEY"],
+    });
+    // default judge: a third model family, not a contestant; GLM-5.3 Flash for cost
     expect(config.roles).toEqual({ contestants: ["opus", "deepseek"], judge: "glm" });
-    expect(config.workers.glm).toMatchObject({ kind: "pi", provider: "together", model: "zai-org/GLM-5.3" });
-    expect(config.prices["together/zai-org/GLM-5.3"]).toMatchObject({ input: 1.4, output: 4.4, cacheRead: 0.26 });
+    expect(config.workers.glm).toMatchObject({ kind: "pi", provider: "baseten", model: "zai-org/GLM-5.3-Flash", thinking: "medium" });
+    expect(config.prices["baseten/zai-org/GLM-5.3-Flash"]).toMatchObject({ input: 0.15, output: 0.5, cacheRead: 0.03 });
+    expect(config.prices["baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast"]).toMatchObject({ input: 0.6, output: 2.4, cacheRead: 0.014 });
+    expect(Object.keys(config.prices).some((k) => k.startsWith("together/"))).toBe(false);
     expect(config.judge.swapOrderPass).toBe(false);
     expect(config.retry).toEqual({ transientMaxRetries: 2, backoffMs: [5000, 30000] });
-    expect(config.prices["together/deepseek-ai/DeepSeek-V4.1-Flash-1017"]).toMatchObject({ input: 0.3, output: 1.2, cacheRead: 0.006 });
     expect(config.quota.warnUtilization).toBe(0.8);
     expect(config.consensus).toEqual({ maxRounds: 1, minRefs: 3 });
     expect(config.duel.maxFixIterations).toBe(2);
@@ -40,7 +49,7 @@ describe("loadConfig", () => {
     const { config, sources } = loadConfig({ configDir, repo });
     expect(sources).toEqual([path.join(configDir, CONFIG_FILENAME), path.join(repo, CONFIG_FILENAME)]);
     expect(config.quota.warnUtilization).toBe(0.5);
-    expect(config.workers.deepseek).toMatchObject({ kind: "pi", thinking: "off", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017" });
+    expect(config.workers.deepseek).toMatchObject({ kind: "pi", thinking: "off", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast" });
     expect(config.workers.opus).toMatchObject({ kind: "claude" });
     expect(config.consensus).toEqual({ maxRounds: 2, minRefs: 3 });
     expect(config.checks).toEqual([{ name: "test", argv: ["npm", "test"], timeoutMs: 600_000, artifacts: [] }]);
@@ -71,9 +80,12 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ configDir, repo })).toThrow(/two different workers/);
   });
 
-  it("warns about Pi thinking levels the Flash model clamps", () => {
-    const { configDir, repo } = setup(undefined, { workers: { deepseek: { thinking: "low" } } });
-    expect(loadConfig({ configDir, repo }).warnings.join("\n")).toMatch(/clamped to 'high'/);
+  it("warns about the Flash thinking clamp only where it was verified (Together)", () => {
+    const together = setup(undefined, { workers: { deepseek: { provider: "together", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017", thinking: "low" } } });
+    expect(loadConfig(together).warnings.join("\n")).toMatch(/clamped to 'high'/);
+    // Baseten (the default) with medium: no clamp warning; the effective level is logged per step
+    const baseten = setup(undefined, { workers: { deepseek: { thinking: "medium" } } });
+    expect(loadConfig(baseten).warnings.join("\n")).not.toMatch(/clamped/);
   });
 
   it("default anonymization patterns are unambiguous (no bare Pi/Together)", () => {

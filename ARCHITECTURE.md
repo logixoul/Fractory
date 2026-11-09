@@ -31,7 +31,7 @@ Worktrees live outside your repo, in `<dataDir>/worktrees/<runId>/<label>`, on b
 `core/src/engine/drive.ts` drives a `WorkflowDef`: a pure function `next(state)` that returns either the next **stage** (steps that run in parallel, or one approval gate) or **done**. Control flow therefore depends only on recorded state, never on model text, except through schema-validated step results.
 
 - **Steps.** A step runs, its result is JSON-normalized, and its `exitCheck` (machine-checkable) decides between `step_completed` and `step_failed`.
-- **Failures.** A hard failure aborts its siblings. A quota hit lets siblings finish (their work is kept) and pauses the run. Transient errors (5xx, network, Together 429) are retried inside the step with backoff, from the step's checkpoint.
+- **Failures.** A hard failure aborts its siblings. A quota hit lets siblings finish (their work is kept) and pauses the run. Transient errors (5xx, network, a provider 429 for Pi) are retried inside the step with backoff, from the step's checkpoint.
 - **Resume.** A crashed step (started, never finished) is marked abandoned and rerun. Completed steps are never rerun. `--retry-failed` reopens a failed run at its failed step.
 - **Pauses.** `paused_quota` (with the reset time; resume is refused earlier unless forced), `awaiting_approval`, and `needs_attention` (the main repo changed during a step; the step's result stands).
 - **Worker calls.** `worker-task.ts` streams a worker's normalized events into the log (text deltas merged), records usage, and computes cost from the price table. Claude is subscription-billed, so its vendor cost is shown as API-equivalent only. It also records quota observations and maps worker errors to engine errors.

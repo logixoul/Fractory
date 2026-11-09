@@ -9,17 +9,17 @@ export const ClaudeWorkerConfig = z.object({
   kind: z.literal("claude"),
   command: z.string().min(1).default("claude"),
   model: z.string().min(1).default("opus"),
-  effort: Effort.default("high"),
+  effort: Effort.default("medium"),
 });
 
 export const PiWorkerConfig = z.object({
   kind: z.literal("pi"),
   command: z.string().min(1).default("pi"),
-  provider: z.string().min(1).default("together"),
+  provider: z.string().min(1).default("baseten"),
   model: z.string().min(1),
-  thinking: Thinking.default("high"),
+  thinking: Thinking.default("medium"),
   /** Env vars passed through to Pi despite secret-looking names (Pi gets no other secrets). */
-  passEnv: z.array(z.string().min(1)).default(["TOGETHER_API_KEY"]),
+  passEnv: z.array(z.string().min(1)).default(["BASETEN_API_KEY"]),
 });
 
 /** Scripted worker for tests (see workers/fake.ts). */
@@ -125,7 +125,7 @@ export const Config = z
       .prefault({}),
     retry: z
       .object({
-        /** Automatic retries of a step after a transient error (5xx, network, Together 429). */
+        /** Automatic retries of a step after a transient error (5xx, network, provider 429 for Pi). */
         transientMaxRetries: z.number().int().min(0).max(5).default(2),
         /** Backoff before retry n (the last value repeats). */
         backoffMs: z.array(z.number().int().nonnegative()).min(1).default([5_000, 30_000]),
@@ -162,33 +162,22 @@ export const Config = z
 export type Config = z.infer<typeof Config>;
 export type ConfigInput = z.input<typeof Config>;
 
-const TOGETHER_DS_FLASH_PRICE = {
-  input: 0.3,
-  output: 1.2,
-  cacheRead: 0.006,
-  source: "https://www.together.ai/pricing ; https://www.together.ai/models/deepseek-v4-1-flash",
-  checkedAt: "2026-11-07",
-};
+/** Baseten Model APIs prices, from `GET https://inference.baseten.co/v1/models` (its `pricing` field). */
+const BASETEN_PRICES = "https://inference.baseten.co/v1/models (pricing field) ; https://www.baseten.co/pricing";
 
 /** Built-in defaults; global and per-repo config files are deep-merged on top. */
 export const DEFAULT_CONFIG_INPUT = {
   workers: {
-    opus: { kind: "claude", model: "opus", effort: "high" },
-    deepseek: { kind: "pi", provider: "together", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017", thinking: "high" },
-    // Judge from a third model family (not a contestant), to avoid self-preference.
-    glm: { kind: "pi", provider: "together", model: "zai-org/GLM-5.3", thinking: "high" },
+    opus: { kind: "claude", model: "opus", effort: "medium" },
+    // Baseten's "Fast" variant: same weights, dedicated capacity for higher throughput, 2× price.
+    deepseek: { kind: "pi", provider: "baseten", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast", thinking: "medium" },
+    // Judge from a third model family (not a contestant), to avoid self-preference; Flash for cost.
+    glm: { kind: "pi", provider: "baseten", model: "zai-org/GLM-5.3-Flash", thinking: "medium" },
   },
   roles: { contestants: ["opus", "deepseek"], judge: "glm" },
   prices: {
-    "together/deepseek-ai/DeepSeek-V4.1-Flash-1017": TOGETHER_DS_FLASH_PRICE,
-    "together/deepseek-ai/DeepSeek-V4.1-Flash": TOGETHER_DS_FLASH_PRICE,
-    "together/zai-org/GLM-5.3": {
-      input: 1.4,
-      output: 4.4,
-      cacheRead: 0.26,
-      source: "https://www.together.ai/pricing ; https://www.together.ai/models/glm-5-3",
-      checkedAt: "2026-11-09",
-    },
+    "baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast": { input: 0.6, output: 2.4, cacheRead: 0.014, source: BASETEN_PRICES, checkedAt: "2026-11-09" },
+    "baseten/zai-org/GLM-5.3-Flash": { input: 0.15, output: 0.5, cacheRead: 0.03, source: BASETEN_PRICES, checkedAt: "2026-11-09" },
   },
 } satisfies ConfigInput;
 
@@ -199,8 +188,10 @@ export function configWarnings(c: Config): string[] {
     out.push(`roles.judge '${c.roles.judge}' is also a contestant; its judgments may favour its own work`);
   }
   for (const [id, w] of Object.entries(c.workers)) {
-    if (w.kind === "pi" && /DeepSeek-V4(\.1)?-Flash/i.test(w.model) && w.thinking !== "off" && w.thinking !== "high") {
-      out.push(`workers.${id}.thinking='${w.thinking}' is clamped to 'high' by Pi for ${w.model}; use 'off' or 'high'`);
+    // Verified in M0 on Together only: Pi clamps every level but off/high to high for this model.
+    // On other providers the effective level is logged per step (message_end.thinkingLevel).
+    if (w.kind === "pi" && w.provider === "together" && /DeepSeek-V4(\.1)?-Flash/i.test(w.model) && w.thinking !== "off" && w.thinking !== "high") {
+      out.push(`workers.${id}.thinking='${w.thinking}' is clamped to 'high' by Pi for ${w.model} on Together; use 'off' or 'high'`);
     }
     if (w.kind === "pi" && !c.prices[`${w.provider}/${w.model}`]) {
       out.push(`workers.${id}: no price for '${w.provider}/${w.model}'; its cost will be reported as unknown`);

@@ -224,3 +224,15 @@ Per-ref resolution, implementation choices (open):
 - [ ] **Run the GUI smoke test on all three operating systems using preinstalled Chrome.** This exercises the packaged GUI without downloading a browser; changing browser or installation strategy affects portability and CI duration.
 - [ ] **Pin GitHub Actions to major version tags.** This receives updates within each major version; pinning commit SHAs would make action dependencies immutable but require explicit updates.
 - [ ] **Documentation separates user setup from engineer architecture.** The README covers operation and configuration, while ARCHITECTURE.md explains implementation and invariants; changing this split affects where contributors and users look for guidance.
+
+## Provider and reasoning switch (2026-11-09)
+
+Requested: Baseten instead of Together; the DeepSeek "Fast" variant; GLM-5.3 Flash as judge; medium reasoning for every model call.
+
+- [ ] **Contestant model: `deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast`.** Baseten also has `DeepSeek-V4.1-Flash-Fast`, but its output limit is 32.8K tokens in Pi's catalog (131K per Baseten) versus 262K for the `1017` build the spec names. Price: input $0.60, output $2.40, cache read $0.014 per 1M, twice the non-Fast price.
+- [ ] **Judge: `zai-org/GLM-5.3-Flash`** (input $0.15, output $0.50, cache read $0.03 per 1M), about a tenth of GLM-5.3.
+- [ ] **Prices come from Baseten's `/v1/models` catalog** (its `pricing` field, checked 2026-11-09), because the pricing web page is JavaScript-rendered. No cache-write price is listed; as before, cost becomes unknown only if a cache-write token count appears.
+- [ ] **The Together price entries were removed** from the defaults. A config that switches a worker back to Together must add its own `prices`. The Together-specific thinking-clamp warning is kept for that case.
+- [ ] **Medium reasoning everywhere:** Claude `effort: "medium"`, Pi `thinking: "medium"` for both Pi workers. These are both the schema defaults and the built-in worker defaults, so a worker declared without a level also gets medium. The smoke script now uses the defaults too, so it costs slightly more than before (it previously used `low`/`off`).
+- [ ] **Whether `medium` is effective on Baseten is unverified.** On Together, only `off`/`high` worked for DeepSeek. The effective level is logged per step; run the smoke script and check `effectiveReasoning`.
+- [ ] **Pi's `passEnv` default is now `["BASETEN_API_KEY"]`.** A `TOGETHER_API_KEY` in your shell is no longer passed to Pi unless you add it to `passEnv`, or put it in the envFile.

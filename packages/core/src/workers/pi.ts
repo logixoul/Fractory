@@ -64,7 +64,7 @@ export function piArgs(cfg: Pick<PiCfg, "provider" | "model" | "thinking">, task
 export interface PiWorkerOptions {
   /** Base env (default process.env). Secret-looking vars are stripped, then `secretEnv` is added. */
   env?: NodeJS.ProcessEnv;
-  /** Values from envFile (e.g. TOGETHER_API_KEY). */
+  /** Values from envFile (e.g. BASETEN_API_KEY). */
   secretEnv?: Record<string, string>;
   /** <dataDir>/pi-agent (PI_CODING_AGENT_DIR) and <dataDir>/pi-sessions. */
   agentDir: string;

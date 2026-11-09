@@ -208,11 +208,11 @@ describe("adapters end to end with a fake CLI", () => {
     const mk = (extra: Record<string, string>) =>
       new PiWorker("deepseek", piCfg, {
         redactor: new Redactor(),
-        secretEnv: { TOGETHER_API_KEY: "tgp_from_envfile_123" },
+        secretEnv: { BASETEN_API_KEY: "bt_from_envfile_123" },
         agentDir: path.join(data, "pi-agent"),
         sessionDir: path.join(data, "pi-sessions"),
         prefixArgs: [FAKE_CLI],
-        env: { ...process.env, GITHUB_TOKEN: "ghp_shouldnotpass", OTHER_SECRET: "nope-nope-nope", TOGETHER_API_KEY: "tgp_from_shell_env", ...extra },
+        env: { ...process.env, GITHUB_TOKEN: "ghp_shouldnotpass", OTHER_SECRET: "nope-nope-nope", BASETEN_API_KEY: "bt_from_shell_env", ...extra },
       });
     const cwd = tmpDir();
     const evs = await collect(
@@ -222,7 +222,7 @@ describe("adapters end to end with a fake CLI", () => {
     );
     expect(evs.at(-1)).toMatchObject({ type: "done", structured: { noChanges: true } });
     const rec = JSON.parse(fs.readFileSync(record, "utf8"));
-    expect(rec.env.TOGETHER_API_KEY).toBe("tgp_from_envfile_123");
+    expect(rec.env.BASETEN_API_KEY).toBe("bt_from_envfile_123");
     expect(rec.env.GITHUB_TOKEN).toBeUndefined();
     expect(rec.env.OTHER_SECRET).toBeUndefined();
     expect(rec.env.PI_CODING_AGENT_DIR).toBe(path.join(data, "pi-agent"));

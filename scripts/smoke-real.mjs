@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Opt-in REAL-MODEL smoke test. Never run by `npm test`. You run it by hand:
 //   npm run build && node scripts/smoke-real.mjs [--claude] [--pi] [--glm] [--opus]
-// Default: all three (Claude, DeepSeek and the GLM-5.3 judge via Pi); Claude uses --model haiku (conserve Pro quota), --opus for Opus.
-// Pi needs TOGETHER_API_KEY in .dev.vars (repo root). Cost: one tiny call per worker.
+// Default: all three (Claude, and DeepSeek and the GLM-5.3 Flash judge via Pi on Baseten); Claude uses --model haiku (conserve Pro quota), --opus for Opus. All use the default reasoning (medium).
+// Pi needs BASETEN_API_KEY in .dev.vars (repo root). Cost: one tiny call per worker.
 //
 // Each worker gets a read-only task in a fresh worktree of a scratch repo, with a sibling
 // worktree holding a "secret" it must not be able to read. Checks: done event, session id,
@@ -26,6 +26,7 @@ import {
   ClaudeWorkerConfig,
   PiWorkerConfig,
   DEFAULT_EXCLUDE_DIRS,
+  DEFAULT_CONFIG_INPUT,
 } from "../packages/core/dist/index.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -95,27 +96,22 @@ async function smoke(name, worker) {
   if (!Object.values(checks).every(Boolean)) failed = true;
 }
 
+// The Pi workers are exactly the built-in defaults (provider, model, reasoning), so the smoke
+// test checks what a real run uses. Claude uses haiku unless --opus, with the default effort.
+const defaults = DEFAULT_CONFIG_INPUT.workers;
+const piKey = PiWorkerConfig.parse(defaults.deepseek).passEnv[0];
 if (want.claude) {
-  const cfg = ClaudeWorkerConfig.parse({ kind: "claude", model: argv.has("--opus") ? "opus" : "haiku", effort: "low" });
+  const cfg = ClaudeWorkerConfig.parse({ ...defaults.opus, model: argv.has("--opus") ? "opus" : "haiku" });
   await smoke("claude", new ClaudeWorker("claude", cfg, { redactor, withholdEnv: Object.keys(secretEnv) }));
 }
-if (want.pi) {
-  if (!secretEnv.TOGETHER_API_KEY) {
-    console.log("\n== pi skipped: no TOGETHER_API_KEY in .dev.vars");
-  } else {
-    const cfg = PiWorkerConfig.parse({ kind: "pi", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017", thinking: "off" });
-    await smoke("pi", new PiWorker("pi", cfg, { redactor, secretEnv, agentDir: path.join(data, "pi-agent"), sessionDir: path.join(data, "pi-sessions") }));
+for (const [flag, id] of [["pi", "deepseek"], ["glm", "glm"]]) {
+  if (!want[flag]) continue;
+  if (!secretEnv[piKey]) {
+    console.log(`\n== ${id} skipped: no ${piKey} in .dev.vars`);
+    continue;
   }
-}
-if (want.glm) {
-  if (!secretEnv.TOGETHER_API_KEY) {
-    console.log("\n== glm skipped: no TOGETHER_API_KEY in .dev.vars");
-  } else {
-    // The default judge (a third model family). Together's model page showed a "launching soon"
-    // banner when this was written: this call verifies the endpoint is live.
-    const cfg = PiWorkerConfig.parse({ kind: "pi", model: "zai-org/GLM-5.3", thinking: "high" });
-    await smoke("glm", new PiWorker("glm", cfg, { redactor, secretEnv, agentDir: path.join(data, "pi-agent"), sessionDir: path.join(data, "pi-sessions") }));
-  }
+  const cfg = PiWorkerConfig.parse(defaults[id]);
+  await smoke(id, new PiWorker(id, cfg, { redactor, secretEnv, agentDir: path.join(data, "pi-agent"), sessionDir: path.join(data, "pi-sessions") }));
 }
 console.log(`\nscratch: ${scratch}`);
 console.log(failed ? "SMOKE FAILED" : "SMOKE OK");
