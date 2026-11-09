@@ -18,7 +18,10 @@ import {
   git,
   createRun,
   dataPaths,
+  inspectRepo,
   isInside,
+  startWarnings,
+  type RepoInfo,
   loadConfig,
   randomHex,
   readQuotaBook,
@@ -40,14 +43,17 @@ export interface AppDeps {
   port: () => number;
   /** Built GUI (packages/web/dist). Optional until M6. */
   webDir?: string;
+  /** Repository pre-filled in the GUI's new-run form. */
+  defaultRepo?: string;
   /** SSE poll interval (ms). */
   tailMs?: number;
   heartbeatMs?: number;
 }
 
+const StartWorkflow = z.enum(["review", "consensus", "duel"]).default("review");
 const StartBody = z
   .object({
-    workflow: z.enum(["review", "consensus", "duel"]).default("review"),
+    workflow: StartWorkflow,
     repo: z.string().min(1),
     prompt: z.string().min(1).optional(),
     promptFile: z.string().min(1).optional(),
@@ -127,7 +133,45 @@ export function createApp(d: AppDeps): Hono {
       throw new BadRequest(e.message);
     });
     await d.pool.start(run.runId);
-    return c.json({ runId: run.runId, warnings: loaded.warnings }, 202);
+    return c.json({ runId: run.runId, warnings: [...loaded.warnings, ...startWarnings(b.workflow, loaded.config)] }, 202);
+  });
+
+  // New-run form: the repo `fractory serve` was started in, and the repos of earlier runs (newest first).
+  app.get("/api/start-info", (c) => {
+    const recent: string[] = [];
+    const runs = d.store
+      .list()
+      .flatMap((r) => (r.state ? [r.state] : []))
+      .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
+    for (const st of runs) if (st.repo && !recent.includes(st.repo)) recent.push(st.repo);
+    return c.json({ defaultRepo: d.defaultRepo ?? null, recentRepos: recent.slice(0, 20) });
+  });
+
+  // New-run form: live check of a typed repo path, plus the warnings starting there would give.
+  // Absolute paths only: a relative path would resolve against the daemon's cwd, which the GUI cannot see.
+  app.get("/api/repo-check", async (c) => {
+    const p = c.req.query("path") ?? "";
+    const wf = StartWorkflow.safeParse(c.req.query("workflow") ?? undefined);
+    if (!wf.success) throw new BadRequest("workflow must be review, consensus or duel");
+    const workflow = wf.data;
+    if (!path.isAbsolute(p)) return c.json({ ok: false, error: "enter an absolute path" });
+    if (!fs.existsSync(p) || !fs.statSync(p).isDirectory()) return c.json({ ok: false, error: "no such directory" });
+    let info: RepoInfo;
+    try {
+      info = await inspectRepo(p);
+    } catch (e) {
+      return c.json({ ok: false, error: (e as Error).message });
+    }
+    if (!info.head) return c.json({ ok: false, error: "the repository has no commits yet", ...info });
+    let warnings: string[];
+    try {
+      const loaded = loadConfig({ repo: info.root, configDir: d.configDir });
+      warnings = [...loaded.warnings, ...startWarnings(workflow, loaded.config)];
+    } catch (e) {
+      return c.json({ ok: false, error: `config: ${(e as Error).message}`, ...info });
+    }
+    if (info.dirty > 0) warnings.push(`${info.dirty} uncommitted change(s); workers see only the HEAD commit, not your working tree`);
+    return c.json({ ok: true, ...info, warnings });
   });
 
   app.get("/api/runs/:id", (c) => c.json(view(runOf(c).runId)));

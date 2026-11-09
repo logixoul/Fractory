@@ -50,9 +50,9 @@ function fakeWorkers(b: Behaviour = {}) {
     );
 }
 
-async function daemon(b: Behaviour = {}): Promise<Daemon & { data: string }> {
+async function daemon(b: Behaviour = {}, o: { defaultRepo?: string } = {}): Promise<Daemon & { data: string }> {
   const data = tmp();
-  const d = await startDaemon({ dataDir: data, configDir: tmp(), workers: fakeWorkers(b), tailMs: 20, heartbeatMs: 50 });
+  const d = await startDaemon({ dataDir: data, configDir: tmp(), workers: fakeWorkers(b), tailMs: 20, heartbeatMs: 50, ...o });
   cleanups.push(() => d.close());
   return { ...d, data };
 }
@@ -331,5 +331,52 @@ describe("daemon API", () => {
     expect((await api(d, "POST", `/api/runs/${runId}/cancel`)).json).toEqual({ result: "cancelled" });
     expect((await waitStatus(d, runId, ["cancelled"])).status).toBe("cancelled");
     expect((await api(d, "GET", "/api/quota")).status).toBe(200);
+  });
+});
+
+describe("daemon new-run form", () => {
+  it("start-info: the serve repo, then earlier runs' repos newest first, deduplicated", async () => {
+    const home = repo();
+    const d = await daemon({}, { defaultRepo: home });
+    expect((await api(d, "GET", "/api/start-info")).json).toEqual({ defaultRepo: home, recentRepos: [] });
+    const r1 = repo();
+    const r2 = repo();
+    await waitStatus(d, await startRun(d, "consensus", r1), ["completed"]);
+    await waitStatus(d, await startRun(d, "consensus", r2), ["completed"]);
+    await waitStatus(d, await startRun(d, "consensus", r1), ["completed"]);
+    expect((await api(d, "GET", "/api/start-info")).json).toEqual({ defaultRepo: home, recentRepos: [r1, r2] });
+    const bare = await daemon();
+    expect((await api(bare, "GET", "/api/start-info")).json.defaultRepo).toBeNull();
+  });
+
+  it("repo-check: absolute paths only; reports root, branch, dirty state and start warnings", async () => {
+    const d = await daemon();
+    const r = repo();
+    expect((await api(d, "GET", "/api/repo-check?path=relative/dir")).json).toEqual({ ok: false, error: "enter an absolute path" });
+    expect((await api(d, "GET", `/api/repo-check?path=${encodeURIComponent(path.join(r, "nope"))}`)).json).toMatchObject({ ok: false, error: "no such directory" });
+    const plain = tmp();
+    expect((await api(d, "GET", `/api/repo-check?path=${encodeURIComponent(plain)}`)).json).toMatchObject({ ok: false, error: expect.stringMatching(/not inside a git repository/) });
+    expect((await api(d, "GET", `/api/repo-check?path=${encodeURIComponent(r)}&workflow=bogus`)).status).toBe(400);
+
+    // a subdirectory resolves to the top level; review without testCommand warns, consensus does not
+    fs.mkdirSync(path.join(r, "sub"));
+    const review = (await api(d, "GET", `/api/repo-check?path=${encodeURIComponent(path.join(r, "sub"))}&workflow=review`)).json;
+    expect(review).toMatchObject({ ok: true, root: r, branch: "main", head: expect.stringMatching(/^[0-9a-f]{40}$/) });
+    expect(review.dirty).toBe(1); // the untracked fractory.config.json
+    expect(review.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/testCommand/), expect.stringMatching(/1 uncommitted change/)]));
+    const consensus = (await api(d, "GET", `/api/repo-check?path=${encodeURIComponent(r)}&workflow=consensus`)).json;
+    expect(consensus.warnings.some((w: string) => /testCommand/.test(w))).toBe(false);
+
+    const empty = tmp();
+    spawnSync("git", ["init", "-q", "-b", "main"], { cwd: empty });
+    expect((await api(d, "GET", `/api/repo-check?path=${encodeURIComponent(empty)}`)).json).toMatchObject({ ok: false, error: "the repository has no commits yet", head: null });
+  });
+
+  it("POST /api/runs returns the same start warnings as the CLI", async () => {
+    const d = await daemon();
+    const res = await api(d, "POST", "/api/runs", { workflow: "review", repo: repo(), prompt: "Add division." });
+    expect(res.status).toBe(202);
+    expect(res.json.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/testCommand is not configured/)]));
+    await waitStatus(d, res.json.runId, ["completed", "failed", "needs_attention", "awaiting_approval"]);
   });
 });

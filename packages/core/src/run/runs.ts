@@ -68,6 +68,45 @@ export async function createRun(store: RunStore, o: CreateRunOptions): Promise<R
   return run;
 }
 
+/** What the start form shows for a candidate repo (GUI repo check). */
+export interface RepoInfo {
+  /** Real path of the repository's top level. */
+  root: string;
+  /** Current branch, or null when HEAD is detached. */
+  branch: string | null;
+  /** HEAD commit, or null in a repository without commits. */
+  head: string | null;
+  /** Number of uncommitted changes (porcelain lines, untracked included). */
+  dirty: number;
+}
+
+/** Inspects a directory inside a git repository. Throws when it is not inside one. */
+export async function inspectRepo(dir: string): Promise<RepoInfo> {
+  let root: string;
+  try {
+    root = await toplevel(dir);
+  } catch {
+    throw new Error(`${dir} is not inside a git repository`);
+  }
+  const text = async (args: string[]) => {
+    const r = await git(args, { cwd: root, allowFail: true });
+    return r.code === 0 ? r.stdout.toString("utf8").trim() || null : null;
+  };
+  const branch = await text(["symbolic-ref", "--short", "-q", "HEAD"]);
+  const head = await text(["rev-parse", "-q", "--verify", "HEAD^{commit}"]);
+  const status = (await git(["status", "--porcelain=v1", "--untracked-files=normal"], { cwd: root })).stdout.toString("utf8").trim();
+  return { root, branch, head, dirty: status === "" ? 0 : status.split("\n").length };
+}
+
+/** Warnings about a run that is about to start (shared by the CLI and the daemon). */
+export function startWarnings(workflow: CreateRunOptions["workflow"], config: Config): string[] {
+  const out: string[] = [];
+  if (workflow === "review" && !config.review.testCommand) {
+    out.push("review.testCommand is not configured; the reviewer's test files cannot confirm findings");
+  }
+  return out;
+}
+
 /**
  * fractory clean: removes a finished run's worktree directories through the guarded function
  * (§8.3). Branches are kept (never deleted, merged or pushed). Returns the removed paths.

@@ -312,3 +312,15 @@ Requested: a new `review` workflow (implement → cross-family review → test c
   - *accepted / rejected* = the implementer's last answer; *withdrawn / maintained* = the reviewer's last verdict.
   - Also on the daemon as `GET /api/stats` (no GUI screen).
 - [ ] **The duel's edit and check helpers moved to `workflows/edit.ts`** (shared, unchanged behaviour). `EditResult` gained `stepChangedFiles`.
+
+## Start runs from the GUI (2026-11-09)
+
+Requested: launch a run from the web UI, with the prompt typed into a textarea (no prompt files), a recent-repos list, the `serve` repo pre-filled, and a live repo check.
+
+- [ ] **The pre-filled repo comes from `fractory serve`'s cwd** (or `--repo`), held by the daemon and served by `GET /api/start-info`, not passed in the login link. One daemon has one default. Without a repo cwd, the form falls back to the most recent run's repo. A `--repo` that is not inside a git repo is a startup error; a non-repo cwd is silently ignored.
+- [ ] **Recent repos = the distinct repos of all runs in the data dir, newest first, capped at 20.** No separate "favourites" list. A deleted repo stays listed until its runs are removed; the live check marks it.
+- [ ] **The repo field takes absolute paths only** (`GET /api/repo-check` refuses relative ones). A relative path would resolve against the daemon's cwd, which the browser can't see. A subdirectory resolves to the repo's top level, which is what the run uses.
+- [ ] **`/api/repo-check` answers for any absolute path**: whether it exists, is a git repo, its branch/HEAD/dirty count, and config warnings. Token-gated and loopback-only, like the rest of the API, but it does let the GUI probe the filesystem. A repo without commits is refused there (the run would fail at setup).
+- [ ] **Start warnings are shared** (`startWarnings` in core): the CLI prints them, `POST /api/runs` returns them, and the form shows them before you start. So far there's one (`review.testCommand` not set); the dirty-repo warning is still recorded on the run as before.
+- [ ] **The prompt draft is kept in `sessionStorage`** (per tab, cleared after a successful start), so a reload doesn't lose it. Typed prompts are saved by the daemon under `<dataDir>/prompts/` (existing behaviour of `POST /api/runs`) and snapshotted into the run.
+- [ ] **No config preview in the form** (which models/reasoning a run will use). It could come from the same repo-check call if wanted.

@@ -20,12 +20,13 @@ interface Daemon {
 let daemon: Daemon;
 let runId: string;
 let scratch: string;
+let repo: string;
 
 test.beforeAll(async () => {
   const core = await import(dist("packages/core/dist/index.js"));
   const { startDaemon } = await import(dist("packages/daemon/dist/index.js"));
   scratch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "fractory-e2e-")));
-  const repo = path.join(scratch, "repo");
+  repo = path.join(scratch, "repo");
   fs.mkdirSync(repo);
   const git = (...a: string[]) => spawnSync("git", ["-c", "user.name=e2e", "-c", "user.email=e2e@localhost", "-c", "commit.gpgsign=false", ...a], { cwd: repo });
   fs.writeFileSync(path.join(repo, "math.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n");
@@ -146,4 +147,30 @@ test("runs list → run → Monaco diff → approve one item → state updates",
   await expect(page.getByText("Duel report")).toBeVisible();
 
   expect(problems).toEqual([]);
+});
+
+test("new-run form: recent repo pre-filled, live repo check, prompt textarea → run starts", async ({ page }) => {
+  await page.goto(daemon.newGuiUrl());
+  await page.getByRole("link", { name: "+ New run" }).click();
+  await expect(page).toHaveURL(/#\/new$/);
+
+  const repoField = page.getByRole("combobox", { name: "Repository" });
+  await expect(repoField).toHaveValue(repo); // the duel's repo, from earlier runs
+  await expect(page.getByText("✓ git repository")).toBeVisible();
+  const start = page.getByRole("button", { name: /^Start / });
+  await expect(start).toBeDisabled(); // no prompt yet
+
+  await repoField.fill(path.join(scratch, "nope"));
+  await expect(page.getByText("✗ no such directory")).toBeVisible();
+  await repoField.fill("relative");
+  await expect(page.getByText("✗ enter an absolute path")).toBeVisible();
+  await page.getByRole("button", { name: repo }).click();
+  await expect(page.getByText("✓ git repository")).toBeVisible();
+
+  await page.getByRole("radio", { name: /consensus/ }).check();
+  await page.getByRole("textbox", { name: "Prompt" }).fill("Design a div function.");
+  await expect(start).toHaveText("Start consensus");
+  await start.click();
+  await expect(page).toHaveURL(/#\/run\/\d{8}-\d{6}-[0-9a-f]{4}$/);
+  await expect(page.locator("h2")).toContainText("consensus");
 });

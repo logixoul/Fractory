@@ -31,3 +31,20 @@ export interface QuotaEntry {
   windows: Record<string, { utilization: number; resetsAt?: number }>;
   observedAt: number;
 }
+
+/** GET /api/start-info: defaults for the new-run form. */
+export interface StartInfo {
+  defaultRepo: string | null;
+  recentRepos: string[];
+}
+
+/** GET /api/repo-check: live check of a typed repo path. */
+export interface RepoCheck {
+  ok: boolean;
+  error?: string;
+  root?: string;
+  branch?: string | null;
+  head?: string | null;
+  dirty?: number;
+  warnings?: string[];
+}

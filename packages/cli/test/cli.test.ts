@@ -163,6 +163,25 @@ describe("fractory CLI", () => {
     await expect(fetch(`${u.origin}/api/health`)).rejects.toThrow();
   });
 
+  it("serve --repo: pre-fills the new-run form with the repository's top level; a non-repo is an error", async () => {
+    const r = repo();
+    fs.mkdirSync(path.join(r, "sub"));
+    const ac = new AbortController();
+    const t = io({ signal: ac.signal, openBrowser: () => {} });
+    const done = runCli(["serve", "--port", "0", "--no-open", "--repo", path.join(r, "sub")], t.io);
+    for (let i = 0; i < 200 && !t.out.join("").includes("GUI:"); i++) await new Promise((res) => setTimeout(res, 10));
+    expect(t.out.join("")).toContain(`new runs default to the repository ${r}`);
+    const gui = new URL(/GUI: (\S+)/.exec(t.out.join(""))![1]!);
+    const cookie = (await fetch(gui, { redirect: "manual" })).headers.get("set-cookie")!.split(";")[0]!;
+    expect(await (await fetch(`${gui.origin}/api/start-info`, { headers: { cookie } })).json()).toEqual({ defaultRepo: r, recentRepos: [] });
+    ac.abort();
+    expect(await done).toBe(EXIT.ok);
+
+    const bad = io();
+    expect(await runCli(["serve", "--port", "0", "--no-open", "--repo", tmp()], bad.io)).toBe(EXIT.failed);
+    expect(bad.err.join("")).toMatch(/not inside a git repository/);
+  });
+
   it("reports user errors without a stack and with exit 1; usage errors exit 64", async () => {
     const t = io();
     expect(await runCli(["show", "20260101-000000-zzzz"], t.io)).toBe(EXIT.failed);

@@ -15,6 +15,8 @@ export interface DaemonOptions {
   /** 0 = any free port. */
   port?: number;
   webDir?: string;
+  /** Repository pre-filled in the GUI's new-run form (`fractory serve` passes its cwd's repo). */
+  defaultRepo?: string;
   /** Test hook (default: real adapters). */
   workers?: WorkerFactory;
   tailMs?: number;
@@ -55,6 +57,7 @@ export async function startDaemon(o: DaemonOptions = {}): Promise<Daemon> {
     codes,
     port: () => port,
     ...(o.webDir ? { webDir: o.webDir } : {}),
+    ...(o.defaultRepo ? { defaultRepo: o.defaultRepo } : {}),
     ...(o.tailMs !== undefined ? { tailMs: o.tailMs } : {}),
     ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
   });

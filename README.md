@@ -123,7 +123,7 @@ All of them print live progress. Exit codes: `0` completed, `1` failed or cancel
 | `fractory cancel <id>` | stop a run; worker process trees are killed |
 | `fractory clean <id>` | remove a finished run's worktrees (branches are kept) |
 | `fractory gc --older-than <days>` | clean all finished runs older than N days |
-| `fractory serve` | start the local daemon and open the GUI |
+| `fractory serve [--repo <path>]` | start the local daemon and open the GUI; `--repo` (default: the current directory, if inside a git repo) is pre-filled in the GUI's new-run form |
 
 Things worth knowing:
 
@@ -136,9 +136,10 @@ Things worth knowing:
 
 ## GUI
 
-`fractory serve` starts the daemon on `127.0.0.1` and opens a single-use login link (valid for 60 s; press Enter in the terminal for a new one). It has four screens:
+`fractory serve` starts the daemon on `127.0.0.1` and opens a single-use login link (valid for 60 s; press Enter in the terminal for a new one). It has these screens:
 
 - **Runs:** status, workflow, repo, times; clean-up of old worktrees.
+- **New run:** pick the workflow, the repository and type the prompt, then start. The repository field is pre-filled with the `serve` repo (or the most recent run's), offers earlier runs' repos, and is checked as you type (git repo, branch, uncommitted changes, start warnings). The daemon drives the run, so closing the browser doesn't stop it; stopping the daemon pauses it until `fractory resume`.
 - **Live:** the phase strip and one pane per worker, streaming text and tool calls (collapsible; blocked calls marked).
 - **Compare:** proposals and critiques side by side, or duel diffs side by side (Monaco).
 - **Verdict:** judge items with checkboxes, approve and resume, the final report. For a review run: the findings with their test results, answers and rebuttals, and apply/dismiss checkboxes for the remaining disagreements.

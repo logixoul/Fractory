@@ -40,6 +40,7 @@
 
 <div class="row head">
   <h2>Runs</h2>
+  <a class="new" href="#/new">+ New run</a>
   <span class="spacer"></span>
   <label class="muted small">Remove worktrees of finished runs older than <input type="number" min="0" bind:value={gcDays} /> days</label>
   <button disabled={gcBusy} onclick={gc}>Clean up</button>
@@ -49,7 +50,7 @@
 {#if runs === null}
   <p class="muted">loading…</p>
 {:else if runs.length === 0}
-  <p class="muted">No runs yet. Start one from the CLI: <code>fractory consensus --repo &lt;path&gt; --prompt &lt;file&gt;</code></p>
+  <p class="muted">No runs yet. <a href="#/new">Start one</a>, or from the CLI: <code>fractory consensus --repo &lt;path&gt; --prompt &lt;file&gt;</code></p>
 {:else}
   <div class="panel">
     <table>
@@ -73,6 +74,7 @@
 <style>
   .head { align-items: baseline; }
   .spacer { flex: 1; }
+  .new { margin-left: 12px; font-weight: 600; }
   .small { font-size: 12px; }
   input[type="number"] { width: 4em; font: inherit; }
   .repo { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

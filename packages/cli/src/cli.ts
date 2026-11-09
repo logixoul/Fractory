@@ -18,7 +18,9 @@ import {
   driveRun,
   loadConfig,
   runConfig,
+  startWarnings,
   storeReviewerStats,
+  inspectRepo,
   type Config,
   type RunEvent,
   type RunHandle,
@@ -102,10 +104,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     const c = ctx();
     const repo = path.resolve(o.repo);
     const loaded = loadConfig({ repo, configDir: c.configDir });
-    for (const w of loaded.warnings) io.err(`warning: ${w}\n`);
-    if (workflow === "review" && !loaded.config.review.testCommand) {
-      io.err("warning: review.testCommand is not configured; the reviewer's test files cannot confirm findings\n");
-    }
+    for (const w of [...loaded.warnings, ...startWarnings(workflow, loaded.config)]) io.err(`warning: ${w}\n`);
     const run = await createRun(c.store, { workflow, repo, promptFile: path.resolve(o.prompt), config: loaded.config });
     io.out(`run ${run.runId} (${workflow}) created; config from: ${loaded.sources.join(", ") || "built-in defaults"}\n`);
     for (const w of run.state().warnings) io.err(`warning: ${w.message}\n`);
@@ -220,11 +219,21 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     .description("start the local daemon (127.0.0.1 only) and open the GUI; Ctrl-C stops it")
     .option("--port <n>", "port (default: any free port)", "0")
     .option("--no-open", "do not open a browser")
-    .action(async (o: { port: string; open: boolean }) => {
+    .option("--repo <path>", "repository pre-filled in the GUI's new-run form (default: the current directory, if inside a git repository)")
+    .action(async (o: { port: string; open: boolean; repo?: string }) => {
       const c = ctx();
       const port = Number(o.port);
       if (!Number.isInteger(port) || port < 0 || port > 65535) throw new UserError(`invalid --port: ${o.port}`);
+      let defaultRepo: string | undefined;
+      if (o.repo !== undefined) {
+        defaultRepo = (await inspectRepo(path.resolve(o.repo)).catch((e: Error) => {
+          throw new UserError(e.message);
+        })).root;
+      } else {
+        defaultRepo = (await inspectRepo(process.cwd()).catch(() => undefined))?.root;
+      }
       const d = await startDaemon({
+        ...(defaultRepo ? { defaultRepo } : {}),
         dataDir: c.dataDir,
         configDir: c.configDir,
         env: io.env,
@@ -233,6 +242,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         ...(io.workers ? { workers: io.workers } : {}),
       });
       io.out(`fractory daemon listening on ${d.url}\nGUI: ${d.guiUrl}\n(single-use login link, valid for 60 s; press Enter here for a new one)\n`);
+      if (defaultRepo) io.out(`new runs default to the repository ${defaultRepo}\n`);
       if (o.open) (io.openBrowser ?? openBrowser)(d.guiUrl);
       io.stdinLines?.(() => {
         const u = d.newGuiUrl();
