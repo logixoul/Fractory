@@ -216,3 +216,11 @@ Per-ref resolution, implementation choices (open):
 - [ ] **"Resolves" means the same rule as everywhere else:** the file exists at that commit and the line or range is within it. It's checked in each side's worktree while it is still at the judged head, and in the judge worktree for base.
 - [ ] **Link format:** `#ref/<label|base>/<sha>/<line>-<end>/<path>`. It's a plain markdown link, so `report.md` stays readable outside the GUI, and DOMPurify allows `#` links. Runs judged before this change have no `evidenceRefs` and fall back to the better-side behaviour.
 - [ ] **The apply step's excerpt of the other diff** now uses the resolved refs: files cited on the other side by the approved items.
+
+## M7
+
+- [ ] **CI tests Node 22 only.** It is the minimum supported major version; adding newer versions would increase runtime and coverage of newer Node behavior.
+- [ ] **Audit fails at moderate severity.** Two known low-severity `deepmerge` findings remain in build dependencies; lowering the threshold would make CI fail until they are resolved.
+- [ ] **Run the GUI smoke test on all three operating systems using preinstalled Chrome.** This exercises the packaged GUI without downloading a browser; changing browser or installation strategy affects portability and CI duration.
+- [ ] **Pin GitHub Actions to major version tags.** This receives updates within each major version; pinning commit SHAs would make action dependencies immutable but require explicit updates.
+- [ ] **Documentation separates user setup from engineer architecture.** The README covers operation and configuration, while ARCHITECTURE.md explains implementation and invariants; changing this split affects where contributors and users look for guidance.
