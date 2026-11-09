@@ -157,11 +157,15 @@ async function loop(run: RunHandle, wf: WorkflowDef, deps: EngineDeps, runAc: Ab
       return;
     }
     if (out.attention.length > 0) {
-      run.append({
-        type: "needs_attention",
-        stepId: out.attention[0]!.stepId,
-        changes: out.attention.flatMap((a) => a.changes),
-      });
+      // Parallel steps observe the same main-repo change; report each change once.
+      const seen = new Set<string>();
+      const changes = out.attention
+        .flatMap((a) => a.changes)
+        .filter((c) => {
+          const k = JSON.stringify([c.path, c.before, c.after]);
+          return seen.has(k) ? false : (seen.add(k), true);
+        });
+      run.append({ type: "needs_attention", stepId: out.attention[0]!.stepId, changes });
       return;
     }
   }

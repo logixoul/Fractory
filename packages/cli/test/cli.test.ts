@@ -1,0 +1,117 @@
+import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { FakeWorker, type Config, type WorkerTask } from "@fractory/core";
+import { EXIT, runCli } from "../src/cli.js";
+
+const dirs: string[] = [];
+const tmp = () => {
+  const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "fractory-cli-")));
+  dirs.push(d);
+  return d;
+};
+afterEach(() => {
+  for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+});
+
+function repo(): string {
+  const r = tmp();
+  const git = (...a: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...a], { cwd: r });
+  git("init", "-q", "-b", "main");
+  fs.writeFileSync(path.join(r, "math.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "init");
+  // per-repo config: fake workers (tests never call a model)
+  fs.writeFileSync(path.join(r, "fractory.config.json"), JSON.stringify({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" } } }));
+  return r;
+}
+
+const verdict = {
+  summary: "s",
+  decisions: [{ topic: "t", decision: "d", rationale: "r", basedOn: "both", evidence: ["math.js:1"] }],
+  unresolved: [],
+};
+
+function fakeWorkers(opts: { hangPropose?: boolean } = {}) {
+  return (config: Config) => {
+    const mk = (id: string) =>
+      new FakeWorker(id, (task: WorkerTask) => {
+        const out = task.outFile ?? "";
+        if (out.endsWith("decision.json")) return { structured: verdict };
+        if (out.endsWith("revise.json")) return { structured: { noChanges: true, proposal: "", changeSummary: "ok" } };
+        if (/Critique it/.test(task.prompt)) return { finalText: "critique" };
+        if (opts.hangPropose) return { actions: [{ hang: true }] };
+        return { finalText: "plan: math.js:1 math.js:2 math.js:3" };
+      });
+    return Object.fromEntries(Object.keys(config.workers).map((id) => [id, mk(id)]));
+  };
+}
+
+function io(extra: Partial<Parameters<typeof runCli>[1]> = {}) {
+  const out: string[] = [];
+  const err: string[] = [];
+  const data = tmp();
+  return {
+    out,
+    err,
+    data,
+    io: {
+      out: (s: string) => out.push(s),
+      err: (s: string) => err.push(s),
+      env: { ...process.env, FRACTORY_DATA_DIR: data, FRACTORY_CONFIG_DIR: tmp() },
+      workers: fakeWorkers(),
+      pollMs: 20,
+      ...extra,
+    },
+  };
+}
+
+describe("fractory CLI", () => {
+  it("consensus → runs → show, with progress output and exit code 0", async () => {
+    const r = repo();
+    const prompt = path.join(tmp(), "p.md");
+    fs.writeFileSync(prompt, "Add division.\n");
+    const t = io();
+    expect(await runCli(["consensus", "--repo", r, "--prompt", prompt], t.io)).toBe(EXIT.ok);
+    const text = t.out.join("");
+    expect(text).toMatch(/run \d{8}-\d{6}-[0-9a-f]{4} \(consensus\) created/);
+    expect(text).toContain("✓ judge");
+    expect(text).toMatch(/decision: .*decision\.md/);
+    const runId = /run (\S+) \(consensus\)/.exec(text)![1]!;
+
+    const l = io({ env: t.io.env });
+    expect(await runCli(["runs"], l.io)).toBe(0);
+    expect(l.out.join("")).toContain(`${runId}  consensus  completed`);
+
+    const s = io({ env: t.io.env });
+    expect(await runCli(["show", runId], s.io)).toBe(0);
+    expect(s.out.join("")).toContain("status    completed");
+    expect(s.out.join("")).toContain("judge");
+  });
+
+  it("cancel via signal stops the run (exit 1) and resume of a cancelled run is a no-op", async () => {
+    const r = repo();
+    const prompt = path.join(tmp(), "p.md");
+    fs.writeFileSync(prompt, "x\n");
+    const ac = new AbortController();
+    const t = io({ workers: fakeWorkers({ hangPropose: true }), signal: ac.signal });
+    setTimeout(() => ac.abort(), 1500);
+    expect(await runCli(["consensus", "--repo", r, "--prompt", prompt], t.io)).toBe(EXIT.failed);
+    const runId = /run (\S+) \(consensus\)/.exec(t.out.join(""))![1]!;
+    const s = io({ env: t.io.env });
+    await runCli(["show", runId, "--json"], s.io);
+    expect(JSON.parse(s.out.join("")).status).toBe("cancelled");
+  });
+
+  it("reports user errors without a stack and with exit 1; usage errors exit 64", async () => {
+    const t = io();
+    expect(await runCli(["show", "20260101-000000-zzzz"], t.io)).toBe(EXIT.failed);
+    expect(t.err.join("")).toMatch(/^error: /);
+    expect(await runCli(["consensus", "--repo", tmp(), "--prompt", "nope.md"], t.io)).toBe(EXIT.failed);
+    expect(await runCli(["duel", "--repo", repo(), "--prompt", "x"], t.io)).toBe(EXIT.failed);
+    expect(await runCli(["bogus"], t.io)).toBe(EXIT.usage);
+    expect(await runCli(["approve", "20260101-000000-aaaa", "--items", "x"], t.io)).toBe(EXIT.failed);
+  });
+});

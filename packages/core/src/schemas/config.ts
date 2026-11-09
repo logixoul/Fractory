@@ -18,6 +18,8 @@ export const PiWorkerConfig = z.object({
   provider: z.string().min(1).default("together"),
   model: z.string().min(1),
   thinking: Thinking.default("high"),
+  /** Env vars passed through to Pi despite secret-looking names (Pi gets no other secrets). */
+  passEnv: z.array(z.string().min(1)).default(["TOGETHER_API_KEY"]),
 });
 
 /** Scripted worker for tests (see workers/fake.ts). */

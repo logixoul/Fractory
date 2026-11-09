@@ -212,7 +212,7 @@ describe("adapters end to end with a fake CLI", () => {
         agentDir: path.join(data, "pi-agent"),
         sessionDir: path.join(data, "pi-sessions"),
         prefixArgs: [FAKE_CLI],
-        env: { ...process.env, GITHUB_TOKEN: "ghp_shouldnotpass", OTHER_SECRET: "nope-nope-nope", ...extra },
+        env: { ...process.env, GITHUB_TOKEN: "ghp_shouldnotpass", OTHER_SECRET: "nope-nope-nope", TOGETHER_API_KEY: "tgp_from_shell_env", ...extra },
       });
     const cwd = tmpDir();
     const evs = await collect(

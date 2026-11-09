@@ -98,7 +98,9 @@ export class PiWorker implements Worker {
     const ack = path.join(task.stepDir ?? os.tmpdir(), `pi-guard-ack-${nonce}`);
     const allow = piGuardAllowlist(task);
     const base = this.opts.env ?? process.env;
-    const stripped = withoutEnv(base, [...CLAUDE_SCRUBBED_ENV, ...Object.keys(base).filter((k) => SECRET_ENV_NAME_RE.test(k))]);
+    const pass = new Set(this.cfg.passEnv.map((k) => k.toUpperCase()));
+    const secretLooking = Object.keys(base).filter((k) => SECRET_ENV_NAME_RE.test(k) && !pass.has(k.toUpperCase()));
+    const stripped = withoutEnv(base, [...CLAUDE_SCRUBBED_ENV, ...secretLooking]);
     const env = withEnv(stripped, {
       ...(this.opts.secretEnv ?? {}),
       PI_CODING_AGENT_DIR: this.opts.agentDir,

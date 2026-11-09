@@ -1,4 +1,4 @@
-export const FRACTORY_VERSION = "0.1.0";
+export * from "./version.js";
 
 export * from "./paths.js";
 export * from "./schemas/config.js";
@@ -44,3 +44,11 @@ export * from "./git/snapshot.js";
 export * from "./git/gates.js";
 export * from "./git/checkpoint.js";
 export * from "./checks/runner.js";
+export * from "./schemas/outputs.js";
+export * from "./text/refs.js";
+export * from "./text/anonymize.js";
+export * from "./text/context.js";
+export * from "./engine/structured.js";
+export * from "./engine/gated.js";
+export * from "./workflows/consensus.js";
+export * from "./run/runs.js";

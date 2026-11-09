@@ -9,8 +9,8 @@
     "node": ">=22.19"
   },
   "scripts": {
-    "typecheck": "tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.test.json",
-    "build": "tsc -p packages/core/tsconfig.json",
+    "typecheck": "tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.test.json && tsc -p packages/cli/tsconfig.test.json",
+    "build": "tsc -p packages/core/tsconfig.json && tsc -p packages/cli/tsconfig.json",
     "test": "vitest run",
     "smoke": "npm run build && node scripts/smoke-real.mjs"
   },
