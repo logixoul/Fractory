@@ -31,11 +31,16 @@
   let selected = $state<string | null>(null);
   let filesError = $state<string | null>(null);
   const setupDone = $derived(st.steps.setup?.status === "completed");
+  const isBranchView = $derived(st.workflow === "duel" || st.workflow === "review");
+  // review: one result branch (the implementer's); duel: both contestants.
+  const branchLabels = $derived(
+    st.workflow === "review" ? Object.keys((st.steps.setup?.result as { branches?: Record<string, string> } | undefined)?.branches ?? {}) : labels,
+  );
 
   $effect(() => {
-    if (st.workflow !== "duel" || !setupDone) return;
+    if (!isBranchView || !setupDone) return;
     void st.lastSeq; // refetch as the branches evolve
-    Promise.all(labels.map((l) => getJson<string[]>(`/api/runs/${st.runId}/changes/${l}`)))
+    Promise.all(branchLabels.map((l) => getJson<string[]>(`/api/runs/${st.runId}/changes/${l}`)))
       .then((lists) => {
         files = [...new Set(lists.flat())].sort();
         if (selected === null || !files.includes(selected)) selected = files[0] ?? null;
@@ -45,20 +50,25 @@
   });
 
   const sides = $derived.by((): [string, string] => {
+    if (st.workflow === "review") return ["base", branchLabels[0] ?? "base"];
     const [a, b] = labels as [string, string];
     return mode === "AvsB" ? [a, b] : mode === "baseA" ? ["base", a] : ["base", b];
   });
 </script>
 
-{#if st.workflow === "duel"}
+{#if isBranchView}
   {#if !setupDone}
     <p class="muted">The worktrees are not set up yet.</p>
   {:else}
-    <div class="row bar">
-      <label><input type="radio" bind:group={mode} value="AvsB" /> {who(labels[0]!)} vs {who(labels[1]!)}</label>
-      <label><input type="radio" bind:group={mode} value="baseA" /> base vs {who(labels[0]!)}</label>
-      <label><input type="radio" bind:group={mode} value="baseB" /> base vs {who(labels[1]!)}</label>
-    </div>
+    {#if st.workflow === "duel"}
+      <div class="row bar">
+        <label><input type="radio" bind:group={mode} value="AvsB" /> {who(labels[0]!)} vs {who(labels[1]!)}</label>
+        <label><input type="radio" bind:group={mode} value="baseA" /> base vs {who(labels[0]!)}</label>
+        <label><input type="radio" bind:group={mode} value="baseB" /> base vs {who(labels[1]!)}</label>
+      </div>
+    {:else}
+      <div class="row bar muted small">base vs {who(sides[1])} (the branch under review)</div>
+    {/if}
     {#if filesError}<p class="error">{filesError}</p>{/if}
     <div class="duel">
       <ul class="files panel">

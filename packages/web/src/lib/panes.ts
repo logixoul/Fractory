@@ -151,12 +151,17 @@ function addWorkerEvent(b: StepBlock, w: WorkerEvent, tools: Map<string, Extract
 export const PHASES: Record<string, string[]> = {
   consensus: ["setup", "propose", "critique", "revise", "judge"],
   duel: ["setup", "implement", "check/fix", "judge", "approve", "apply", "recheck", "report"],
+  review: ["setup", "implement", "check/fix", "review", "confirm", "respond", "rebuttal", "approve", "apply", "report"],
 };
 
 const phaseOf = (stepId: string) => {
   const head = stepId.split(".")[0]!;
   if (head === "check" || head === "fix" || head === "outcome") return "check/fix";
   if (head === "refix") return "recheck";
+  // review: checks after a response belong to it; retests precede the rebuttal; post-apply checks to apply.
+  if (head === "rcheck" || head === "rfix") return "respond";
+  if (head === "retest") return "rebuttal";
+  if (head === "acheck" || head === "afix") return "apply";
   return head;
 };
 

@@ -22,6 +22,7 @@ import {
   loadConfig,
   randomHex,
   readQuotaBook,
+  storeReviewerStats,
   squashedDiff,
   worktreeBranch,
   type RunStore,
@@ -46,7 +47,7 @@ export interface AppDeps {
 
 const StartBody = z
   .object({
-    workflow: z.enum(["consensus", "duel"]),
+    workflow: z.enum(["review", "consensus", "duel"]).default("review"),
     repo: z.string().min(1),
     prompt: z.string().min(1).optional(),
     promptFile: z.string().min(1).optional(),
@@ -255,6 +256,9 @@ export function createApp(d: AppDeps): Hono {
   });
 
   app.get("/api/quota", (c) => c.json(readQuotaBook(dataPaths(d.dataDir).quotaFile)));
+
+  // fractory stats: per-reviewer statistics over completed review runs.
+  app.get("/api/stats", (c) => c.json(storeReviewerStats(d.store)));
 
   // GUI (SPA): static files from webDir, index.html fallback for client-side routes.
   app.get("*", (c) => {

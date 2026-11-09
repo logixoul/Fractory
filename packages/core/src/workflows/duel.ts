@@ -1,21 +1,20 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { runChecksIsolated, runSetup, type CommandResult } from "../checks/runner.js";
+import { runSetup } from "../checks/runner.js";
 import { StepFailure } from "../engine/errors.js";
 import { withGates } from "../engine/gated.js";
 import { runStructured } from "../engine/structured.js";
 import type { ApprovalGate, StepContext, StepDef, WorkStep, WorkflowDef } from "../engine/types.js";
-import { checkpoint, commitStepResult, restoreCheckpoint } from "../git/checkpoint.js";
-import { changedFiles, revParse, squashedDiff } from "../git/git.js";
+import { revParse, squashedDiff } from "../git/git.js";
 import { ensureWorktree, worktreeBranch } from "../git/worktree.js";
-import { dataPaths } from "../paths.js";
 import { DuelVerdict, type DuelEvidence } from "../schemas/outputs.js";
 import type { RunState } from "../state/reducer.js";
-import { leakCheck, relativizePaths } from "../text/anonymize.js";
+import { leakCheck } from "../text/anonymize.js";
 import { loadProjectContext } from "../text/context.js";
 import { evidenceMarkdown, sideMentioned, type ResolvedRef } from "@fractory/shared/refs";
 import { checkRefs, extractRefs } from "../text/refs.js";
 import { randomHex, seededShuffle } from "../util/random.js";
+import { checkFixLoop, checksMarkdown, editTurn, fixTurn, guardCtx, headsOf, noShell, runChecksFor, type CheckStepResult, type EditResult, type Loop } from "./edit.js";
 import { identityTokenWarning, judgeScrubber, labelsOf, promptText, res, runSwapPass, writeInput, writeOut } from "./common.js";
 
 /**
@@ -43,22 +42,7 @@ export interface DuelSetup {
   contextFiles: { path: string; sha256: string; bytes: number; truncated: boolean }[];
 }
 
-export interface EditResult {
-  sessionId: string;
-  checkpoint: string;
-  head: string;
-  summaryFile: string;
-  changedFiles: string[];
-}
-
-export interface CheckStepResult {
-  sha: string;
-  allPassed: boolean;
-  results: Omit<CommandResult, "logTail">[];
-  /** Log tails of failed checks only (fed back to the worker). */
-  failures: { name: string; argv: string[]; code: number | null; reason: string; logTail: string }[];
-  artifacts: string[];
-}
+export type { CheckStepResult, EditResult, Loop } from "./edit.js";
 
 export interface JudgeItem {
   aspect: string;
@@ -105,29 +89,6 @@ export function applyWorkerOf(st: RunState): { workerId: string; label: string }
   const label = Object.entries(st.labels).find(([, w]) => w === workerId)?.[0];
   if (!label) throw new Error(`apply worker '${workerId}' has no label in this run`);
   return { workerId, label };
-}
-
-export interface Loop {
-  /** Next step of the loop, if it is not finished. */
-  next?: string;
-  finalCheck?: CheckStepResult;
-  /** Latest edit (the loop's head). */
-  head?: EditResult;
-  sessionId?: string;
-  fixes: number;
-}
-
-/** A check → fix loop after an edit step: check.0 → [fix.1 → check.1 → …] until pass or maxFix. */
-function checkFixLoop(st: RunState, first: EditResult, ids: { check: (i: number) => string; fix: (i: number) => string }, maxFix: number): Loop {
-  let head = first;
-  for (let i = 0; ; i++) {
-    const chk = res<CheckStepResult>(st, ids.check(i));
-    if (!chk) return { next: ids.check(i), head, sessionId: head.sessionId, fixes: i };
-    if (chk.allPassed || i >= maxFix) return { finalCheck: chk, head, sessionId: head.sessionId, fixes: i };
-    const fix = res<EditResult>(st, ids.fix(i + 1));
-    if (!fix) return { next: ids.fix(i + 1), head, sessionId: head.sessionId, fixes: i };
-    head = fix;
-  }
 }
 
 export interface Chain extends Loop {
@@ -227,77 +188,7 @@ function setupStep(env: DuelEnv, st: RunState): WorkStep {
   };
 }
 
-function guardCtx(env: DuelEnv, st: RunState) {
-  return { dataDir: env.dataDir, mainRepo: st.repo };
-}
-
-async function headsOf(worktrees: Record<string, string>): Promise<Record<string, string>> {
-  const out: Record<string, string> = {};
-  for (const [l, p] of Object.entries(worktrees)) out[l] = await revParse(p);
-  return out;
-}
-
-/**
- * One checkpointed, gated edit turn (§8.8): checkpoint (or restore the previous attempt's
- * checkpoint), run the worker in edit mode in its own worktree, commit the result.
- */
-async function editTurn(
-  ctx: StepContext,
-  env: DuelEnv,
-  st: RunState,
-  setup: DuelSetup,
-  o: { label: string; workerId: string; prompt: string; sessionId?: string; siblingWritable: string[] },
-): Promise<EditResult> {
-  const wt = setup.worktrees[o.label]!;
-  const hooks = dataPaths(env.dataDir).emptyHooks;
-  const guard = guardCtx(env, st);
-  const prev = ctx.state().steps[ctx.stepId]?.checkpoint;
-  let cp: string;
-  if (prev) {
-    const removed = await restoreCheckpoint(wt, prev, guard, ctx.config.preserveOnClean);
-    if (removed.length > 0) await runSetup(wt, ctx.config.setup, path.join(ctx.stepDir, "logs", "setup"), ctx.signal);
-    cp = prev;
-  } else {
-    cp = await checkpoint(wt, ctx.stepId, hooks);
-    ctx.record({ type: "checkpoint_created", stepId: ctx.stepId, label: o.label, sha: cp });
-  }
-  const inputsDir = path.join(ctx.stepDir, "inputs");
-  const restoreTo = { ...(await headsOf(setup.worktrees)), [o.label]: cp };
-  const done = await withGates(
-    ctx,
-    {
-      targets: { mainRepo: st.repo, worktrees: setup.worktrees },
-      guard,
-      restoreTo,
-      preserveOnClean: ctx.config.preserveOnClean,
-      writableLabel: o.label,
-      siblingWritable: o.siblingWritable,
-      inputsDir,
-    },
-    () =>
-      ctx.runWorker(o.workerId, {
-        prompt: o.prompt,
-        cwd: wt,
-        mode: "edit",
-        stepDir: ctx.stepDir,
-        inputsDir,
-        ...(o.sessionId ? { sessionId: o.sessionId } : {}),
-      }),
-  );
-  const head = await commitStepResult(wt, ctx.stepId, hooks);
-  return {
-    sessionId: done.sessionId,
-    checkpoint: cp,
-    head,
-    summaryFile: writeOut(ctx, "summary.md", done.finalText),
-    changedFiles: await changedFiles(wt, setup.base, head),
-  };
-}
-
-const noShell = (checkNames: string[]) =>
-  `You have no shell. The orchestrator runs the project's checks after you finish${checkNames.length ? ` (${checkNames.join(", ")})` : ""} and reports failures back to you.`;
-
-/** A fix turn: resume the session with the failed check output as an input file. */
+/** A fix turn of the duel (resumes the contestant's session with the failed checks). */
 function fixStep(env: DuelEnv, st: RunState, setup: DuelSetup, o: { id: string; label: string; failed: CheckStepResult; iteration: number; sessionId: string; siblingWritable: string[] }): WorkStep {
   const workerId = st.labels[o.label]!;
   const maxFix = configOf(st).duel.maxFixIterations;
@@ -305,20 +196,7 @@ function fixStep(env: DuelEnv, st: RunState, setup: DuelSetup, o: { id: string; 
     id: o.id,
     workerId,
     label: o.label,
-    async run(ctx) {
-      const roots = [...Object.values(setup.worktrees), env.dataDir];
-      const report = o.failed.failures
-        .map((f) => `## ${f.name} (exit ${f.code ?? "none"}, ${f.reason})\n\n\`${JSON.stringify(f.argv)}\`\n\n\`\`\`\n${relativizePaths(f.logTail, roots)}\n\`\`\``)
-        .join("\n\n");
-      const file = writeInput(ctx, "check-failures.md", `# Failed checks (fix iteration ${o.iteration} of ${maxFix})\n\n${report}\n`);
-      const prompt = [
-        `The orchestrator ran the project's checks on your changes and some failed. The output is in this file (read it with your read tool): ${file}`,
-        "Fix the code in this worktree so the checks pass, without weakening or deleting the checks themselves.",
-        noShell(ctx.config.checks.map((c) => c.name)),
-        "Reply with a short summary of the fix.",
-      ].join("\n\n");
-      return editTurn(ctx, env, st, setup, { label: o.label, workerId, prompt, sessionId: o.sessionId, siblingWritable: o.siblingWritable });
-    },
+    run: (ctx) => fixTurn(ctx, env, st, setup, { ...o, workerId, maxFix }),
   };
 }
 
@@ -380,43 +258,6 @@ function checkStep(env: DuelEnv, st: RunState, setup: DuelSetup, label: string, 
       return runChecksFor(ctx, env, st, setup.worktrees[label]!, sha);
     },
   };
-}
-
-async function runChecksFor(ctx: StepContext, env: DuelEnv, st: RunState, wt: string, sha: string): Promise<CheckStepResult> {
-  const cfg = ctx.config;
-  if (cfg.checks.length === 0) return { sha, allPassed: true, results: [], failures: [], artifacts: [] };
-  const guard = guardCtx(env, st);
-  if (ctx.attempt > 1) {
-    // A previous attempt may have been interrupted mid-check: start from the post-step commit.
-    const removed = await restoreCheckpoint(wt, sha, guard, cfg.preserveOnClean);
-    if (removed.length > 0) await runSetup(wt, cfg.setup, path.join(ctx.stepDir, "logs", "setup"), ctx.signal);
-  }
-  const out = await runChecksIsolated({
-    worktree: wt,
-    postStepSha: sha,
-    checks: cfg.checks,
-    setup: cfg.setup,
-    preserveOnClean: cfg.preserveOnClean,
-    guard,
-    snapshot: cfg.snapshot,
-    stepDir: ctx.stepDir,
-    signal: ctx.signal,
-  });
-  return {
-    sha,
-    allPassed: out.allPassed,
-    results: out.results.map(({ logTail: _t, ...r }) => r),
-    failures: out.results.filter((r) => !r.passed).map((r) => ({ name: r.name, argv: r.argv, code: r.code, reason: r.reason, logTail: r.logTail })),
-    artifacts: out.artifacts,
-  };
-}
-
-function checksMarkdown(c: CheckStepResult | undefined, fixes: number, roots: string[]): string {
-  if (!c || c.results.length === 0) return "No checks are configured for this repository.\n";
-  const lines = [`Fix iterations used: ${fixes}`, "", "| check | result | exit | duration |", "|---|---|---|---|"];
-  for (const r of c.results) lines.push(`| ${r.name} | ${r.passed ? "pass" : "FAIL"} | ${r.code ?? r.reason} | ${(r.durationMs / 1000).toFixed(1)}s |`);
-  for (const f of c.failures) lines.push("", `### ${f.name} output (tail)`, "", "```", relativizePaths(f.logTail, roots), "```");
-  return lines.join("\n") + "\n";
 }
 
 function judgeStep(env: DuelEnv, st: RunState, setup: DuelSetup, maxFix: number): WorkStep {

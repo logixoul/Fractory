@@ -239,6 +239,20 @@ Findings:
 - **DeepSeek `medium` vs `none`/`high`:** no measurable difference on this prompt (0 reasoning tokens and the same 187–188 completion tokens at every level). The prompt is trivial, so the model may simply not think on it. A harder prompt is needed to see whether the level matters.
 - **GLM `high` vs `low`:** no difference on this prompt either. Only `max` produced visible reasoning here.
 
+## 2a. OpenAI through Pi (review workflow reviewer, 2026-11-09)
+
+The review workflow's default reviewer is `gpt-6.1-sol` via Pi's built-in `openai` provider: same adapter, same path guard, same gates. **Not yet verified with a real call.** Everything below comes from Pi 1.5.0's bundled sources; run `npm run smoke -- --gpt` to verify.
+
+| | Source / status |
+|---|---|
+| Provider id `openai`, key env `OPENAI_API_KEY` | Pi source (`pi-ai/dist/env-api-keys.js`, `providers/openai.js`). `pi --list-models` lists nothing without a key in the agent dir, so the catalog was read from `pi-ai/dist/providers/data/openai.json`. |
+| Model `gpt-6.1-sol`, `api: "openai-responses"`, context 272k, max output 128k | Pi catalog |
+| Reasoning (`thinkingLevelMap`) | off/minimal → `null` (not sent); low/medium/high/xhigh/max → the same `reasoning.effort`. Default `medium`. |
+| Prices, USD per 1M | input 2, output 10, cache read 0.10 (prompts ≤ 272k). Pi's catalog agrees with third-party trackers (pricepertoken.com, getdeploying.com). **Not checked on openai.com** (developers.openai.com/api/docs/pricing); one tracker listed a different cache rate. Pi's catalog also has a cache-write price (2.5); OpenAI's caching is automatic, so fractory sets none, and a non-zero `cacheWrite` count would make the cost unknown, not guessed. |
+| Stream shape, `usage`, `thinkingLevel`, `stopReason: "error"` on OpenAI | not observed; assumed to match §2 (Pi normalizes providers) |
+
+The worker's `passEnv` is `["OPENAI_API_KEY"]`. That filter applies to the **shell** environment only. Every value from `envFile` is passed to every Pi worker (unchanged behaviour), so with both keys in `.dev.vars`, all three Pi workers receive both. Claude and the checks receive neither. See `docs/decisions-todo.md`, "Review workflow".
+
 ---
 
 ## 3. Process lifecycle (verified on Windows)

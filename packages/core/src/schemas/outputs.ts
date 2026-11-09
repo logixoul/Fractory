@@ -104,3 +104,124 @@ export const SwapCheck = z
   })
   .strict();
 export type SwapCheck = z.infer<typeof SwapCheck>;
+
+// ---- review workflow -------------------------------------------------------------------
+
+export const Severity = z.enum(["bug", "risk", "design", "nit"]);
+export type Severity = z.infer<typeof Severity>;
+
+/** Why a test-file path is unusable, or undefined. Repo-relative, inside the worktree, not in .git. */
+export function testPathProblem(p: string): string | undefined {
+  const s = p.replace(/\\/g, "/");
+  if (s.trim() === "" || s !== s.trim()) return "empty or padded with whitespace";
+  if (s.startsWith("/") || /^[A-Za-z]:/.test(s) || s.startsWith("~")) return "must be repo-relative";
+  const parts = s.split("/");
+  if (parts.some((x) => x === ".." || x === "")) return "must not contain '..' or empty segments";
+  if (parts[0]!.toLowerCase() === ".git") return "must not be inside .git";
+  if (s.startsWith("-")) return "must not start with '-'";
+  return undefined;
+}
+
+const ReviewFindingBase = z
+  .object({
+    id: z.string().regex(/^[A-Za-z0-9_-]{1,32}$/, "id: 1-32 letters, digits, '_' or '-'").describe("short unique id, e.g. F1"),
+    severity: Severity.describe("bug: wrong behaviour; risk: may break under some condition; design: structure/maintainability; nit: minor"),
+    title: z.string().min(1).describe("one line"),
+    explanation: z.string().min(1).describe("what is wrong, why, and what to do instead"),
+    refs: z.array(z.string().min(1)).min(1).describe("repo-relative path:line or path:start-end references into the code under review"),
+    confidence: z.number().min(0).max(1).describe("0-1: how sure you are this is a real problem"),
+    testFile: z
+      .object({
+        path: z.string().min(1).describe("repo-relative path of a NEW test file"),
+        content: z.string().min(1).describe("complete file content"),
+      })
+      .strict()
+      .optional()
+      .describe("optional: a test that FAILS on the current code because of this finding and passes once it is fixed"),
+  })
+  .strict();
+export type ReviewFinding = z.infer<typeof ReviewFindingBase>;
+
+/** Reviewer output. Ids unique; test paths safe (checked here, so a violation gets the repair turn). */
+export function reviewOutputSchema(maxFindings: number) {
+  return z
+    .object({
+      summary: z.string().describe("2-4 sentences: overall assessment of the change"),
+      findings: z.array(ReviewFindingBase).max(maxFindings).describe("may be empty if you find no problems"),
+    })
+    .strict()
+    .superRefine((v, ctx) => {
+      const seen = new Set<string>();
+      const paths = new Set<string>();
+      v.findings.forEach((f, i) => {
+        if (seen.has(f.id)) ctx.addIssue({ code: "custom", path: ["findings", i, "id"], message: `duplicate finding id '${f.id}'` });
+        seen.add(f.id);
+        if (f.testFile) {
+          const why = testPathProblem(f.testFile.path);
+          if (why) ctx.addIssue({ code: "custom", path: ["findings", i, "testFile", "path"], message: `test path ${why}` });
+          const key = f.testFile.path.replace(/\\/g, "/").toLowerCase();
+          if (paths.has(key)) ctx.addIssue({ code: "custom", path: ["findings", i, "testFile", "path"], message: "each finding needs its own test file path" });
+          paths.add(key);
+        }
+      });
+    });
+}
+export type ReviewOutput = z.infer<ReturnType<typeof reviewOutputSchema>>;
+
+/** Every listed id exactly once (the respond and rebuttal outputs). */
+function eachIdOnce(ids: readonly string[], key: string) {
+  return (v: Record<string, { id: string }[]>, ctx: z.RefinementCtx) => {
+    const got = v[key]!.map((r) => r.id);
+    const dup = got.filter((id, i) => got.indexOf(id) !== i);
+    const missing = ids.filter((id) => !got.includes(id));
+    if (dup.length) ctx.addIssue({ code: "custom", path: [key], message: `duplicate ids: ${[...new Set(dup)].join(", ")}` });
+    if (missing.length) ctx.addIssue({ code: "custom", path: [key], message: `missing a response for: ${missing.join(", ")}` });
+  };
+}
+
+const idsEnum = (ids: readonly string[]) => z.enum(ids as [string, ...string[]]);
+
+/** Implementer's answer to the open findings (dynamic: exactly these ids). */
+export function respondSchema(ids: readonly string[]) {
+  return z
+    .object({
+      responses: z.array(
+        z
+          .object({
+            id: idsEnum(ids),
+            action: z.enum(["fixed", "rejected"]).describe("fixed: you changed the code to address it; rejected: you disagree and changed nothing for it"),
+            reasoning: z.string().min(1),
+            refs: z.array(z.string().min(1)).describe("repo-relative path:line refs supporting your answer (for fixed: where the fix is)"),
+          })
+          .strict(),
+      ),
+    })
+    .strict()
+    .superRefine(eachIdOnce(ids, "responses"));
+}
+export type RespondOutput = z.infer<ReturnType<typeof respondSchema>>;
+
+/** Reviewer's rebuttal (dynamic: exactly these ids). Maintaining needs new evidence. */
+export function rebuttalSchema(ids: readonly string[]) {
+  return z
+    .object({
+      rebuttals: z.array(
+        z
+          .object({
+            id: idsEnum(ids),
+            verdict: z.enum(["withdrawn", "maintained"]).describe("withdrawn: the response settles it; maintained: the problem remains"),
+            reasoning: z.string().min(1),
+            refs: z.array(z.string().min(1)).describe("for maintained: at least one repo-relative path:line ref into the current code"),
+          })
+          .strict(),
+      ),
+    })
+    .strict()
+    .superRefine(eachIdOnce(ids, "rebuttals"))
+    .superRefine((v, ctx) => {
+      v.rebuttals.forEach((r, i) => {
+        if (r.verdict === "maintained" && r.refs.length === 0) ctx.addIssue({ code: "custom", path: ["rebuttals", i, "refs"], message: "a maintained finding needs new evidence (at least one ref)" });
+      });
+    });
+}
+export type RebuttalOutput = z.infer<ReturnType<typeof rebuttalSchema>>;

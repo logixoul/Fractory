@@ -171,5 +171,35 @@ describe("fractory CLI", () => {
     expect(await runCli(["duel", "--repo", repo(), "--prompt", "missing.md"], t.io)).toBe(EXIT.failed);
     expect(await runCli(["bogus"], t.io)).toBe(EXIT.usage);
     expect(await runCli(["approve", "20260101-000000-aaaa", "--items", "x"], t.io)).toBe(EXIT.failed);
+    expect(await runCli(["run", "--repo", repo(), "--prompt", "p.md", "--workflow", "nope"], t.io)).toBe(EXIT.failed);
+    expect(t.err.join("")).toContain("unknown --workflow nope");
+  });
+
+  it("run defaults to the review workflow; stats reports per reviewer", async () => {
+    const r = repo();
+    const prompt = path.join(tmp(), "p.md");
+    fs.writeFileSync(prompt, "Add division.\n");
+    const workers = (config: Config) =>
+      Object.fromEntries(
+        Object.keys(config.workers).map((id) => [
+          id,
+          new FakeWorker(id, (task: WorkerTask) =>
+            task.outFile?.endsWith("review.json")
+              ? { structured: { summary: "fine", findings: [] } }
+              : { actions: [{ writeFile: { path: "div.js", content: "export const div = (a, b) => a / b;\n" } }], finalText: "added" },
+          ),
+        ]),
+      );
+    const t = io({ workers });
+    expect(await runCli(["run", "--repo", r, "--prompt", prompt], t.io)).toBe(EXIT.ok);
+    expect(t.out.join("")).toMatch(/\(review\) created/);
+    expect(t.out.join("")).toContain("✓ review (gpt)");
+    expect(t.err.join("")).toContain("review.testCommand is not configured");
+    t.out.length = 0;
+    expect(await runCli(["stats"], t.io)).toBe(EXIT.ok);
+    expect(t.out.join("")).toMatch(/gpt \(openai\/gpt-6\.1-sol\)\s+1\s+0\.0/);
+    t.out.length = 0;
+    expect(await runCli(["stats", "--json"], t.io)).toBe(EXIT.ok);
+    expect(JSON.parse(t.out.join(""))).toEqual([expect.objectContaining({ reviewer: "gpt", runs: 1, findings: 0 })]);
   });
 });

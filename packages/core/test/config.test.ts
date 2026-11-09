@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { CONFIG_FILENAME, ConfigError, loadConfig } from "../src/config/load.js";
+import { familyOf } from "../src/schemas/config.js";
 import { tmpDir } from "./helpers.js";
 
 function setup(globalCfg?: unknown, repoCfg?: unknown) {
@@ -29,7 +30,11 @@ describe("loadConfig", () => {
       passEnv: ["BASETEN_API_KEY"],
     });
     // default judge: a third model family, not a contestant; GLM-5.3 Flash for cost
-    expect(config.roles).toEqual({ contestants: ["opus", "deepseek"], judge: "glm" });
+    expect(config.roles).toEqual({ contestants: ["opus", "deepseek"], judge: "glm", implementer: "opus", reviewer: "gpt" });
+    // review workflow: the reviewer is OpenAI's gpt-6.1-sol via Pi (a different family than opus)
+    expect(config.workers.gpt).toMatchObject({ kind: "pi", provider: "openai", model: "gpt-6.1-sol", thinking: "medium", passEnv: ["OPENAI_API_KEY"] });
+    expect(config.prices["openai/gpt-6.1-sol"]).toMatchObject({ input: 2, output: 10, cacheRead: 0.1 });
+    expect(config.review).toEqual({ maxRounds: 1, maxFixIterations: 2, maxFindings: 30 });
     expect(config.workers.glm).toMatchObject({ kind: "pi", provider: "baseten", model: "zai-org/GLM-5.3-Flash", thinking: "high" });
     expect(config.prices["baseten/zai-org/GLM-5.3-Flash"]).toMatchObject({ input: 0.15, output: 0.5, cacheRead: 0.03 });
     expect(config.prices["baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast"]).toMatchObject({ input: 0.6, output: 2.4, cacheRead: 0.014 });
@@ -73,6 +78,34 @@ describe("loadConfig", () => {
     expect(() => loadConfig(a)).toThrow(/invalid JSON/);
     const b = setup(undefined, { anonymize: { patterns: ["(unclosed"] } });
     expect(() => loadConfig(b)).toThrow(/invalid regex/);
+  });
+
+  it("review roles: the reviewer must be from a different model family", () => {
+    // claude → anthropic; an Anthropic model on a multi-vendor provider is the same family
+    const same = setup(undefined, { workers: { sonnet: { kind: "pi", provider: "openrouter", model: "anthropic/claude-sonnet-5" } }, roles: { reviewer: "sonnet" } });
+    expect(() => loadConfig(same)).toThrow(/different model family .* \(both anthropic\)/);
+    // an explicit family wins over inference
+    const explicit = setup(undefined, { workers: { gpt: { family: "anthropic" } } });
+    expect(() => loadConfig(explicit)).toThrow(/both anthropic/);
+    // unknown family → must be set explicitly
+    const unknown = setup(undefined, { workers: { mystery: { kind: "pi", provider: "baseten", model: "acme/thing-1" } }, roles: { reviewer: "mystery" } });
+    expect(() => loadConfig(unknown)).toThrow(/cannot infer the model family of worker 'mystery'; set workers\.mystery\.family/);
+    expect(loadConfig(setup(undefined, { workers: { mystery: { kind: "pi", provider: "baseten", model: "acme/thing-1", family: "acme" } }, roles: { reviewer: "mystery" } })).config.roles.reviewer).toBe("mystery");
+    // DeepSeek reviewing Opus is fine
+    expect(loadConfig(setup(undefined, { roles: { reviewer: "deepseek" } })).config.roles.reviewer).toBe("deepseek");
+    expect(() => loadConfig(setup(undefined, { roles: { implementer: "nobody" } }))).toThrow(/unknown worker 'nobody'/);
+  });
+
+  it("familyOf infers families from providers and model ids", () => {
+    expect(familyOf("a", { kind: "claude", command: "claude", model: "haiku", effort: "medium" })).toBe("anthropic");
+    const pi = (provider: string, model: string) => familyOf("x", { kind: "pi", command: "pi", provider, model, thinking: "medium", passEnv: [] });
+    expect(pi("openai", "gpt-6.1-sol")).toBe("openai");
+    expect(pi("baseten", "deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast")).toBe("deepseek");
+    expect(pi("baseten", "zai-org/GLM-5.3-Flash")).toBe("zhipu");
+    expect(pi("openrouter", "openai/gpt-6.1-sol")).toBe("openai");
+    expect(pi("together", "Qwen/Qwen3-Coder")).toBe("alibaba");
+    expect(pi("baseten", "acme/thing")).toBeUndefined();
+    expect(familyOf("f1", { kind: "fake" })).toBe("fake-f1");
   });
 
   it("rejects identical contestants", () => {

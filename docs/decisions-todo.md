@@ -267,3 +267,48 @@ Requested: Pi request-level retries for rate limits; a declared `side` per judge
 - [ ] **No reasoning-token estimate was added.** The probe showed that Baseten reports `reasoning_tokens`, that they're included in `completion_tokens`, and that Pi maps them into `usage.reasoning` and `usage.output`. Cost therefore already covers them. Both models reported 0 because they didn't reason on the smoke prompt. The 75 s GLM turn was latency on Baseten's side, not hidden thinking. Billing was inferred from the usage fields, not checked against an invoice.
   - fractory has no budget cap today, so there was nothing to switch to an estimate.
 - [ ] **Not done:** recording receive timestamps in the raw stream files. With them, time-to-first-delta could be measured afterwards; without them, only Pi's per-message `durationMs` is available.
+
+
+## Review workflow (2026-11-09)
+
+Requested: a new `review` workflow (implement → cross-family review → test confirmation → respond → rebuttal → apply/dismiss gate), made the default of `fractory run`, plus `fractory stats`.
+
+**Reviewer model and keys**
+- [ ] **The reviewer runs through Pi's `openai` provider** (`workers.gpt`), not a new adapter. Pi 1.5.0's catalog has `gpt-6.1-sol`, so the existing guard, gates and stream parsing apply unchanged. **No real call has been made yet:** `npm run smoke -- --gpt` (new, opt-in, needs `OPENAI_API_KEY`) verifies it. *Alternative:* OpenRouter (`openai/gpt-6.1-sol`) behind one key.
+- [ ] **Price `openai/gpt-6.1-sol`: input 2, output 10, cache read 0.10 per 1M.** Taken from Pi's catalog and third-party trackers; **not checked on openai.com**, and one tracker gave a different cache rate. No cache-write price, because OpenAI caching is automatic; a non-zero `cacheWrite` would make the cost unknown.
+- [ ] **Reviewer reasoning `medium`**, matching the other models. off/minimal aren't mapped for this model (config warning).
+- [ ] **`envFile` secrets reach every Pi worker** (existing behaviour, now more visible). With both keys in `.dev.vars`, DeepSeek, GLM and GPT all receive `BASETEN_API_KEY` and `OPENAI_API_KEY`; `passEnv` filters only the shell env. *Option:* filter `envFile` values by `passEnv` too (a small change in `PiWorker`), so each worker gets only its own provider's key.
+
+**Roles and families**
+- [ ] **`family` on every worker config**, inferred when omitted: Claude → `anthropic`; Pi from a first-party provider id (`openai`, `deepseek`, ...), else from model-id patterns (`gpt-`, `deepseek`, `glm`, `qwen`, ...). A fake worker is its own family. An implementer or reviewer whose family can't be inferred is a config error ("set workers.X.family").
+- [ ] **The family check runs for every config, not only review runs**, because roles are part of the shared config. A global config whose reviewer shares the implementer's family fails even for `fractory duel`.
+- [ ] **`roles` in `run_created` gained optional `implementer`/`reviewer`.** A review run's labels are implementer + reviewer (not the contestants). The quota pre-flight checks a run's labelled workers, plus the judge for duel/consensus.
+
+**Steps and rules**
+- [ ] **Step ids:** `implement`, `check.i`/`fix.i`, `review`, `confirm`, `respond.r`, `rcheck.r.i`/`rfix.r.i`, `retest.r`, `rebuttal.r`, `approve`, `apply`, `acheck.i`/`afix.i`, `report`. `review.maxFixIterations` (default 2) bounds every fix loop.
+- [ ] **Three worktrees per run:** implementer, reviewer and scratch. The reviewer's is reset to the implementer's head (its own branch moves) before every reviewer turn. The scratch branch collects one hook-free commit per test run (`fractory: confirm test F1`); it is never the result branch.
+- [ ] **The reviewer resumes its review session for the rebuttal** (it keeps its context). It gets the responses, the whole diff, the delta since its last look, and the checks.
+- [ ] **No anonymization between implementer and reviewer.** They see each other's text as is, unlike the judge. Each knows it is in a review, and there is no A/B to hide.
+- [ ] **Findings without a resolving ref after the repair turn are dropped** (warning `findings_dropped`, listed in the report and in stats as `dropped`), rather than failing the run. *Alternative:* fail the step, as the duel judge does.
+- [ ] **A maintained rebuttal whose new refs don't resolve after its repair turn is still maintained**, flagged `evidenceInvalid` with a warning, so the user decides. *Alternative:* treat it as withdrawn.
+- [ ] **Added beyond the spec: `retest.r`.** After each response round, the tests of confirmed findings rerun at the new head. A finding answered "fixed" whose test still fails is maintained automatically, just like a confirmed-but-rejected one.
+- [ ] **Responses' refs are resolved and recorded, but not repaired.** An invalid ref there only shows up as unresolved. A repair would need another edit turn.
+- [ ] **A respond turn that changed no files skips the checks.** The previous check result stands. A "fixed" answer with no file changes gives the warning `fixed_without_changes`.
+- [ ] **`review.maxRounds` is 1–5, not 0.** A round always ends in a rebuttal.
+- [ ] **An implementation without changes fails the run** (the `outcome` step), like a double forfeit in the duel.
+- [ ] **Added to the reviewer's schema: `summary`.** It is shown in the report and the GUI. `review.maxFindings` (default 30) caps the findings list via the schema.
+
+**Test confirmation**
+- [ ] **`review.testCommand`** (unset by default) is `{argv, timeoutMs, env?, failExitCodes: [1], requireFileInOutput: true}`. `{testFile}` in argv is replaced by the repo-relative path; without a placeholder, the path is appended.
+- [ ] **Classification:** exit 0 is `refuted`; an exit in `failExitCodes` is `confirmed`; timeout, spawn error or any other code is `error`. With `requireFileInOutput`, output that doesn't contain the test file's name is also `error`. This catches "no tests found" and collection errors, which most runners report with exit 1. The argv echo at the top of the log is excluded from that search.
+- [ ] **Without a test command, every test file is recorded as `error`** (warning `no_test_command`). The reviewer is told not to write tests, and `fractory run` warns at start.
+- [ ] **Test files may overwrite an existing file** at the head (recorded as `overwrote`). Paths are repo-relative, without `..`, and not in `.git` (schema-checked).
+
+**Gate and stats**
+- [ ] **The gate reuses the approval mechanism:** approved item numbers are applied, the rest are dismissed. `fractory approve <id> --items ""` dismisses all. When nothing is applied, the apply step records `skipped` and no checks run.
+- [ ] **`fractory stats` counts completed review runs only**, grouped by reviewer worker id (with its configured model).
+  - *confirmed bug rate* = bug-severity findings whose test failed / bug-severity findings.
+  - *refuted rate* = passing tests / tests run.
+  - *accepted / rejected* = the implementer's last answer; *withdrawn / maintained* = the reviewer's last verdict.
+  - Also on the daemon as `GET /api/stats` (no GUI screen).
+- [ ] **The duel's edit and check helpers moved to `workflows/edit.ts`** (shared, unchanged behaviour). `EditResult` gained `stepChangedFiles`.

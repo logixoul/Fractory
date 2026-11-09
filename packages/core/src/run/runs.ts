@@ -16,6 +16,7 @@ import { newLabels, randomSeed } from "../util/random.js";
 import type { Worker } from "../workers/types.js";
 import { consensusWorkflow } from "../workflows/consensus.js";
 import { duelWorkflow } from "../workflows/duel.js";
+import { reviewWorkflow } from "../workflows/review.js";
 
 export interface CreateRunOptions {
   workflow: Exclude<Workflow, "test">;
@@ -42,7 +43,7 @@ export async function createRun(store: RunStore, o: CreateRunOptions): Promise<R
     repo,
     promptFile: path.resolve(o.promptFile),
     promptSha256: createHash("sha256").update(prompt).digest("hex"),
-    labels: newLabels(o.config.roles.contestants),
+    labels: newLabels(o.workflow === "review" ? [o.config.roles.implementer, o.config.roles.reviewer] : o.config.roles.contestants),
     roles: o.config.roles,
     seed: randomSeed(),
     config: JSON.parse(JSON.stringify(o.config)),
@@ -130,6 +131,8 @@ export function workflowFor(st: RunState, dataDir: string): WorkflowDef {
       return consensusWorkflow({ dataDir });
     case "duel":
       return duelWorkflow({ dataDir });
+    case "review":
+      return reviewWorkflow({ dataDir });
     default:
       throw new Error(`workflow '${st.workflow}' is not available yet`);
   }

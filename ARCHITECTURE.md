@@ -85,6 +85,19 @@ Processes are spawned with argv arrays (`cross-spawn`), and whole process trees 
 - Each evidence entry declares its side (`A`, `B` or `base`). The orchestrator checks that the ref exists there, at A's head, B's head or the base; a mismatch gets one repair turn. Links, the file view and `report.md` use exactly that side and commit.
 - `judge.swapOrderPass` (on by default) re-rates every point with A/B swapped and keeps only agreeing points. If none survive, it records `no_robust_preferences` and continues.
 
+Edit turns and check/fix loops shared by duel and review live in `core/src/workflows/edit.ts`.
+
+**Review** (`core/src/workflows/review.ts`), the default of `fractory run`:
+
+`setup` → `implement` → `check.0` → [`fix.i` → `check.i`] → `review` → `confirm` → per round r ≤ `review.maxRounds`: `respond.r` → [`rcheck.r.0` → `rfix.r.i` → `rcheck.r.i`] → `retest.r` → `rebuttal.r` → `approve` (gate) → `apply` → `acheck.0` → [`afix.i` → `acheck.i`] → `report`.
+
+- **Three worktrees.** The implementer's (the result branch), the reviewer's (read-only, reset to the implementer's head before each reviewer turn) and a scratch one where tests run. Every worker step snapshot-gates all three plus the main repo.
+- **Findings and refs.** Every finding needs a `path:line` ref that resolves at the implementer's head. One repair turn; findings still without one are dropped (`findings_dropped`). Ids are unique and test paths repo-relative, enforced by the schema, so a violation gets the structured-output repair turn.
+- **Confirmation, with no model involved.** For each test file: reset scratch to the head, write the file, commit it (hook-free), and run `review.testCommand` isolated like a check. Exit 0 is `refuted`, an exit in `failExitCodes` is `confirmed`, and anything else is `error`, as is output that doesn't name the file. `retest.r` reruns the confirmed findings' tests at the new head.
+- **Respond.** A checkpointed edit turn with structured output: exactly one `fixed|rejected` per open finding (a schema built from the open ids). Checks run only if the turn changed files.
+- **Rebuttal.** The reviewer resumes its session: `withdrawn|maintained` per finding. A maintained finding needs a resolving ref (one repair turn; otherwise it is kept but flagged `evidenceInvalid`). A confirmed finding that was rejected, or whose test still fails, is maintained automatically without asking.
+- **Outcome.** Maintained findings go to the gate. The approved ones are applied by the implementer's session, the rest are dismissed. `reviewProgress(st)` derives all of this from step results; the report, the gate and `fractory stats` (`core/src/run/stats.ts`) read it.
+
 ## Daemon and GUI
 
 `packages/daemon/src/security.ts`:
@@ -93,7 +106,7 @@ Processes are spawned with argv arrays (`cross-spawn`), and whole process trees 
 - Host and Origin allowlists; cross-site fetches refused; no CORS; strict CSP;
 - a per-launch token as a bearer header or HttpOnly SameSite=Strict cookie, obtained by exchanging a single-use 60 s code (`/auth`). The token never appears in a URL.
 
-The API serves run state, an SSE stream of the event log (it replays from `Last-Event-ID`, then tails by byte offset), and run files (always `text/plain`, confined to the run dir). It also serves duel diffs, and file contents at commits recorded in the run. Commands: start, approve, resume, cancel, clean, gc.
+The API serves run state, an SSE stream of the event log (it replays from `Last-Event-ID`, then tails by byte offset), and run files (always `text/plain`, confined to the run dir). It also serves branch diffs (duel, review), file contents at commits recorded in the run, and reviewer stats (`/api/stats`). Commands: start, approve, resume, cancel, clean, gc.
 
 The GUI rebuilds everything from that API, so a page refresh loses nothing. Model output is rendered as markdown sanitized by DOMPurify. Monaco is loaded lazily for diffs and the in-app file view.
 

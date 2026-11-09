@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { QuotaWindow, UsageTokens, WorkerEvent } from "./worker-events.js";
 
-export const Workflow = z.enum(["consensus", "duel", "test"]);
+export const Workflow = z.enum(["consensus", "duel", "review", "test"]);
 export type Workflow = z.infer<typeof Workflow>;
 
 export const StepFailureKind = z.enum([
@@ -43,7 +43,13 @@ export const RunEvent = z.discriminatedUnion("type", [
     promptSha256: z.string(),
     /** label → workerId. The only place the mapping exists (§8.16). */
     labels: z.record(z.string(), z.string()),
-    roles: z.object({ contestants: z.tuple([z.string(), z.string()]), judge: z.string() }),
+    roles: z.object({
+      contestants: z.tuple([z.string(), z.string()]),
+      judge: z.string(),
+      /** review workflow roles (absent in runs created before it existed). */
+      implementer: z.string().optional(),
+      reviewer: z.string().optional(),
+    }),
     seed: z.number().int(),
     config: z.unknown(),
     fractoryVersion: z.string(),

@@ -66,8 +66,18 @@ Judge model is configurable; default to DeepSeek via Pi (to save Pro quota), wit
 6. Resume the **Opus session** (by session id) in its worktree with the approved items, plus the relevant excerpts from DeepSeek's diff. Rerun checks.
 7. Final report. **Never merge or push anything**; leave the branches for me.
 
+## Workflow 3: review (added 2026-11-09; the default for `fractory run`; duel and consensus stay)
+1. **implement:** the implementer (default Opus) works in its worktree, with the usual check → fix loop.
+2. **review:** the reviewer (a different model family, default `gpt-6.1-sol`) works in its own read-only worktree at the implementer's head. Inputs: the task, the squashed diff, the check results. Structured output: `findings [{id, severity: bug|risk|design|nit, title, explanation, refs: path:line[], confidence, testFile?: {path, content}}]`. Every finding needs ≥ 1 ref that resolves at the implementer's head (one repair turn).
+3. **test confirmation:** for each finding with a `testFile`, the orchestrator writes it into a scratch worktree at the implementer's head and runs the configured test command. It records `confirmed` (the test fails), `refuted` (the test passes) or `error` (the test doesn't run). No model decides this.
+4. **respond:** the implementer resumes its session with the findings, including their confirmation status. Structured output per finding: `{id, action: fixed|rejected, reasoning, refs}`. Fixes are committed; the checks and fix loop run again.
+5. **rebuttal (one round):** the reviewer sees the responses and the new diff, and answers per finding: `withdrawn` or `maintained` (with new evidence). A finding that was confirmed but rejected is maintained automatically.
+6. **outcome:** `report.md` lists all findings, responses and statuses. Maintained disagreements go to an approval gate, where the user picks per finding: apply (the implementer fixes it) or dismiss.
+
+Config: `review.maxRounds` (default 1 rebuttal round), `roles.implementer`, `roles.reviewer` (its family must differ). `fractory stats` reports, per reviewer: findings per run, the confirmed bug rate, the refuted rate, and accepted/rejected/withdrawn counts.
+
 ## CLI
-`fractory consensus --repo <path> --prompt <file>`, `fractory duel --repo <path> --prompt <file>`, `fractory runs`, `fractory show <id>`, `fractory approve <id> --items 1,3`, `fractory resume <id>`, `fractory cancel <id>`, `fractory serve` (starts daemon + opens GUI). Config via `fractory.config.json` (global in the OS config dir, overridable per repo), validated with zod.
+`fractory run --repo <path> --prompt <file> [--workflow review|duel|consensus]`, `fractory review …`, `fractory consensus --repo <path> --prompt <file>`, `fractory duel --repo <path> --prompt <file>`, `fractory runs`, `fractory show <id>`, `fractory approve <id> --items 1,3`, `fractory resume <id>`, `fractory cancel <id>`, `fractory stats`, `fractory serve` (starts daemon + opens GUI). Config via `fractory.config.json` (global in the OS config dir, overridable per repo), validated with zod.
 
 ## Daemon security (non-negotiable)
 Bind to `127.0.0.1` only. Random per-launch token required on every request (passed to the GUI via the URL the CLI opens). Validate the `Host` and `Origin` headers to block DNS rebinding and CSRF. No permissive CORS.

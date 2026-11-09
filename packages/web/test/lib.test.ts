@@ -80,6 +80,14 @@ describe("phase indicator", () => {
     const gate = phaseStatuses(st({ setup: "completed", judge: "completed" }, "awaiting_approval"));
     expect(gate.find((x) => x.phase === "approve")!.status).toBe("active");
   });
+
+  it("review: post-response checks belong to respond, retests to rebuttal, post-apply checks to apply", () => {
+    const steps = { setup: "completed", implement: "completed", "check.0": "completed", review: "completed", confirm: "completed", "respond.1": "completed", "rcheck.1.0": "running", "retest.1": "completed", "acheck.0": "completed" };
+    const p = phaseStatuses({ ...st(steps), workflow: "review" } as RunState);
+    expect(p.map((x) => x.phase)).toEqual(["setup", "implement", "check/fix", "review", "confirm", "respond", "rebuttal", "approve", "apply", "report"]);
+    const by = Object.fromEntries(p.map((x) => [x.phase, x.status]));
+    expect(by).toMatchObject({ "check/fix": "done", respond: "active", rebuttal: "done", apply: "done", report: "pending" });
+  });
 });
 
 describe("refs → in-app file view", () => {

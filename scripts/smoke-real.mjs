@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // Opt-in REAL-MODEL smoke test. Never run by `npm test`. You run it by hand:
-//   npm run build && node scripts/smoke-real.mjs [--claude] [--pi] [--glm] [--opus]
+//   npm run build && node scripts/smoke-real.mjs [--claude] [--pi] [--glm] [--gpt] [--opus]
 // Default: all three (Claude, and DeepSeek and the GLM-5.3 Flash judge via Pi on Baseten); Claude uses --model haiku (conserve Pro quota), --opus for Opus. All use the default reasoning (medium; the GLM judge high).
 // Pi needs BASETEN_API_KEY in .dev.vars (repo root). Cost: one tiny call per worker.
+// --gpt (opt-in, not part of the default set): the review workflow's reviewer, gpt-6.1-sol via
+// Pi's openai provider; needs OPENAI_API_KEY in .dev.vars.
 //
 // Each worker gets a read-only task in a fresh worktree of a scratch repo, with a sibling
 // worktree holding a "secret" it must not be able to read. Checks: done event, session id,
@@ -31,8 +33,8 @@ import {
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const argv = new Set(process.argv.slice(2));
-const any = ["--claude", "--pi", "--glm"].some((f) => argv.has(f));
-const want = { claude: argv.has("--claude") || !any, pi: argv.has("--pi") || !any, glm: argv.has("--glm") || !any };
+const any = ["--claude", "--pi", "--glm", "--gpt"].some((f) => argv.has(f));
+const want = { claude: argv.has("--claude") || !any, pi: argv.has("--pi") || !any, glm: argv.has("--glm") || !any, gpt: argv.has("--gpt") };
 const SECRET = "ZEBRA-PLUM-4471";
 
 const scratch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "fractory-smoke-")));
@@ -99,13 +101,13 @@ async function smoke(name, worker) {
 // The Pi workers are exactly the built-in defaults (provider, model, reasoning), so the smoke
 // test checks what a real run uses. Claude uses haiku unless --opus, with the default effort.
 const defaults = DEFAULT_CONFIG_INPUT.workers;
-const piKey = PiWorkerConfig.parse(defaults.deepseek).passEnv[0];
 if (want.claude) {
   const cfg = ClaudeWorkerConfig.parse({ ...defaults.opus, model: argv.has("--opus") ? "opus" : "haiku" });
   await smoke("claude", new ClaudeWorker("claude", cfg, { redactor, withholdEnv: Object.keys(secretEnv) }));
 }
-for (const [flag, id] of [["pi", "deepseek"], ["glm", "glm"]]) {
+for (const [flag, id] of [["pi", "deepseek"], ["glm", "glm"], ["gpt", "gpt"]]) {
   if (!want[flag]) continue;
+  const piKey = PiWorkerConfig.parse(defaults[id]).passEnv[0];
   if (!secretEnv[piKey]) {
     console.log(`\n== ${id} skipped: no ${piKey} in .dev.vars`);
     continue;

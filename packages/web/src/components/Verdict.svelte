@@ -4,6 +4,7 @@
   import { evidenceMarkdown, type RefLink, type ResolvedRef } from "@fractory/shared/refs";
   import { contextFromEvidence, linkContext, refContext } from "../lib/refctx.js";
   import Markdown from "./Markdown.svelte";
+  import ReviewPanel from "./ReviewPanel.svelte";
 
   let { state: st, onAct, onRefresh, busy }: { state: RunState; onAct: (path: string, body?: unknown) => Promise<void>; onRefresh: () => Promise<void>; busy: boolean } = $props();
 
@@ -51,7 +52,9 @@
   }
 </script>
 
-{#if st.workflow === "consensus"}
+{#if st.workflow === "review"}
+  <ReviewPanel state={st} {onAct} {onRefresh} {busy} />
+{:else if st.workflow === "consensus"}
   {#if result.decisionMd}
     <section class="panel"><Markdown runId={st.runId} file={result.decisionMd} refs={refContext(st)} /></section>
   {:else}

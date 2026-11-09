@@ -1,4 +1,4 @@
-import type { ListedRun, RunEvent, RunState } from "@fractory/core";
+import type { ListedRun, ReviewerStats, RunEvent, RunState } from "@fractory/core";
 
 const time = (iso: string) => iso.slice(11, 19);
 const who = (st: RunState, stepId: string) => {
@@ -46,6 +46,33 @@ export function formatEvent(e: RunEvent, st: RunState): string | null {
 function firstLine(s: string): string {
   const l = s.split("\n")[0] ?? "";
   return l.length > 200 ? `${l.slice(0, 200)}…` : l;
+}
+
+const pct = (x: number | null) => (x === null ? "-" : `${Math.round(x * 100)}%`);
+
+export function formatStats(stats: ReviewerStats[]): string {
+  if (stats.length === 0) return "no completed review runs\n";
+  const rows = [["REVIEWER", "RUNS", "FINDINGS/RUN", "CONFIRMED BUGS", "REFUTED", "TESTED", "ACCEPTED", "REJECTED", "WITHDRAWN", "MAINTAINED", "APPLIED", "DISMISSED"]];
+  for (const s of stats) {
+    rows.push([
+      `${s.reviewer}${s.models.length ? ` (${s.models.join(", ")})` : ""}`,
+      String(s.runs),
+      s.findingsPerRun.toFixed(1),
+      pct(s.confirmedBugRate),
+      pct(s.refutedRate),
+      String(s.tested),
+      String(s.accepted),
+      String(s.rejected),
+      String(s.withdrawn),
+      String(s.maintained),
+      String(s.applied),
+      String(s.dismissed),
+    ]);
+  }
+  return (
+    table(rows) +
+    "\nconfirmed bugs = bug findings whose test failed / bug findings; refuted = passing tests / tests run.\naccepted/rejected = the implementer's last answer; withdrawn/maintained = the reviewer's last verdict.\n"
+  );
 }
 
 export function formatRunList(list: ListedRun[]): string {
@@ -111,6 +138,16 @@ export function formatShow(st: RunState): string {
 
 /** A judge item for the approval prompt (duel items have aspect/betterSide/recommendation). */
 export function formatItem(it: unknown, n: number): string {
+  // A review disagreement (id/severity/title + both positions).
+  const d = it as { id?: string; severity?: string; title?: string; test?: string; implementer?: string; reviewer?: string; refs?: string[] };
+  if (typeof d?.title === "string" && typeof d.severity === "string") {
+    return [
+      `  ${n}. ${d.id} [${d.severity}] ${d.title}${d.test && d.test !== "none" ? ` (test: ${d.test})` : ""}`,
+      `     implementer: ${d.implementer}`,
+      `     reviewer: ${d.reviewer}`,
+      ...(d.refs?.length ? [`     refs: ${d.refs.join(", ")}`] : []),
+    ].join("\n");
+  }
   const o = it as { aspect?: string; betterSide?: string; betterWorker?: string; recommendation?: string; risk?: string; evidence?: string[] };
   if (typeof o?.aspect !== "string") return `  ${n}. ${JSON.stringify(it)}`;
   return [

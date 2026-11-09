@@ -55,7 +55,7 @@ export interface RunState {
   promptFile: string;
   promptSha256: string;
   labels: Record<string, string>;
-  roles: { contestants: [string, string]; judge: string };
+  roles: { contestants: [string, string]; judge: string; implementer?: string; reviewer?: string };
   seed: number;
   config: unknown;
   createdAt: string;

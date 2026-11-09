@@ -60,7 +60,8 @@ export interface ResolvedRef {
   path: string;
   line: number;
   endLine?: number;
-  side: "A" | "B" | "base";
+  /** "head": the review workflow, where refs point into the implementer's head commit. */
+  side: "A" | "B" | "base" | "head";
   /** Contestant label of the side (absent for base). */
   label?: string;
   /** Commit the ref resolved against. */
@@ -74,7 +75,7 @@ export interface ResolvedRef {
    */
   chosenBy: "declared" | "evidence" | "item" | "better" | "only" | "base";
   /** All places it resolved. */
-  resolvedIn: ("A" | "B" | "base")[];
+  resolvedIn: ("A" | "B" | "base" | "head")[];
 }
 
 const SIDE_PATTERNS = [
@@ -107,7 +108,8 @@ export function refHref(r: Pick<ResolvedRef, "label" | "sha" | "line" | "endLine
  */
 export function evidenceMarkdown(evidence: readonly string[], refs: readonly ResolvedRef[], labels: Record<string, string>): string {
   const parts = refs.map((r) => {
-    const where = r.side === "base" ? "base" : `${r.side}, ${labels[r.label!] ?? r.label}`;
+    const who = labels[r.label!] ?? r.label;
+    const where = r.side === "base" ? "base" : r.side === "head" ? `${who} head` : `${r.side}, ${who}`;
     return `[${r.raw}](${refHref(r)}) (${where} @ ${r.sha.slice(0, 7)}${r.ambiguous ? ", ambiguous" : ""})`;
   });
   const unresolved = evidence.filter((e) => !refs.some((r) => e.includes(r.raw)));

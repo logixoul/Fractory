@@ -101,7 +101,8 @@ function preflightQuota(run: RunHandle, deps: EngineDeps, now: number): void {
   const book = readQuotaBook(deps.quotaFile);
   const st = run.state();
   const threshold = deps.config.quota.warnUtilization;
-  const workerIds = [...new Set([...st.roles.contestants, st.roles.judge])];
+  // The run's labelled workers (contestants, or implementer + reviewer) and the judge where one is used.
+  const workerIds = [...new Set([...Object.values(st.labels), ...(st.workflow === "review" ? [] : [st.roles.judge])])];
   for (const workerId of workerIds) {
     const entry = book[workerId];
     if (!entry) continue;

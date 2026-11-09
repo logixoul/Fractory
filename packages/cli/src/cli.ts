@@ -18,6 +18,7 @@ import {
   driveRun,
   loadConfig,
   runConfig,
+  storeReviewerStats,
   type Config,
   type RunEvent,
   type RunHandle,
@@ -26,7 +27,7 @@ import {
 } from "@fractory/core";
 import { startDaemon } from "@fractory/daemon";
 import { defaultWebDir, openBrowser } from "./browser.js";
-import { formatEvent, formatItem, formatRunList, formatShow } from "./format.js";
+import { formatEvent, formatItem, formatRunList, formatShow, formatStats } from "./format.js";
 
 export interface CliIo {
   out(text: string): void;
@@ -97,25 +98,50 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     }
   };
 
-  const startCmd = (workflow: "consensus" | "duel", description: string) =>
+  const start = async (workflow: StartWorkflow, o: { repo: string; prompt: string }) => {
+    const c = ctx();
+    const repo = path.resolve(o.repo);
+    const loaded = loadConfig({ repo, configDir: c.configDir });
+    for (const w of loaded.warnings) io.err(`warning: ${w}\n`);
+    if (workflow === "review" && !loaded.config.review.testCommand) {
+      io.err("warning: review.testCommand is not configured; the reviewer's test files cannot confirm findings\n");
+    }
+    const run = await createRun(c.store, { workflow, repo, promptFile: path.resolve(o.prompt), config: loaded.config });
+    io.out(`run ${run.runId} (${workflow}) created; config from: ${loaded.sources.join(", ") || "built-in defaults"}\n`);
+    for (const w of run.state().warnings) io.err(`warning: ${w.message}\n`);
+    code = await driveAndReport(run, c, false);
+  };
+  const startCmd = (workflow: StartWorkflow, description: string) =>
     program
       .command(workflow)
       .description(description)
       .requiredOption("--repo <path>", "target git repository")
       .requiredOption("--prompt <file>", "prompt file (markdown)")
-      .action(async (o: { repo: string; prompt: string }) => {
-        const c = ctx();
-        const repo = path.resolve(o.repo);
-        const loaded = loadConfig({ repo, configDir: c.configDir });
-        for (const w of loaded.warnings) io.err(`warning: ${w}\n`);
-        const run = await createRun(c.store, { workflow, repo, promptFile: path.resolve(o.prompt), config: loaded.config });
-        io.out(`run ${run.runId} (${workflow}) created; config from: ${loaded.sources.join(", ") || "built-in defaults"}\n`);
-        for (const w of run.state().warnings) io.err(`warning: ${w.message}\n`);
-        code = await driveAndReport(run, c, false);
-      });
+      .action((o: { repo: string; prompt: string }) => start(workflow, o));
 
+  startCmd("review", "implement → checks → cross-family review → test confirmation → respond → rebuttal → approval → apply");
   startCmd("consensus", "proposals → cross-critique → revisions → anonymized judge (read-only)");
   startCmd("duel", "two independent implementations → checks → judge → approval → apply (never merges or pushes)");
+
+  program
+    .command("run")
+    .description("start a run (default workflow: review)")
+    .requiredOption("--repo <path>", "target git repository")
+    .requiredOption("--prompt <file>", "prompt file (markdown)")
+    .option("--workflow <name>", `one of ${WORKFLOWS.join(", ")}`, "review")
+    .action(async (o: { repo: string; prompt: string; workflow: string }) => {
+      if (!(WORKFLOWS as readonly string[]).includes(o.workflow)) throw new UserError(`unknown --workflow ${o.workflow}; use one of ${WORKFLOWS.join(", ")}`);
+      await start(o.workflow as StartWorkflow, o);
+    });
+
+  program
+    .command("stats")
+    .description("per-reviewer statistics over completed review runs")
+    .option("--json", "machine-readable output")
+    .action((o: { json?: boolean }) => {
+      const stats = storeReviewerStats(ctx().store);
+      io.out(o.json ? JSON.stringify(stats, null, 2) + "\n" : formatStats(stats));
+    });
 
   program
     .command("runs")
@@ -139,7 +165,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
 
   program
     .command("approve <runId>")
-    .description("approve judge items (1-based) of a run awaiting approval; then `fractory resume`")
+    .description("approve items (1-based) of a run awaiting approval (duel: judge items; review: findings to apply, the rest are dismissed); then `fractory resume`")
     .requiredOption("--items <list>", "comma-separated item numbers, e.g. 1,3 (empty string = none)")
     .action((runId: string, o: { items: string }) => {
       const ids = o.items.trim() === "" ? [] : o.items.split(",").map((s) => Number(s.trim()));
@@ -238,6 +264,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
 
 class UserError extends Error {}
 
+type StartWorkflow = "consensus" | "duel" | "review";
+const WORKFLOWS: readonly StartWorkflow[] = ["review", "duel", "consensus"];
+
 function summary(st: RunState | undefined) {
   if (!st) return { status: "unreadable" };
   return { workflow: st.workflow, status: st.status, repo: st.repo, createdAt: st.createdAt, updatedAt: st.updatedAt };
@@ -250,6 +279,9 @@ function nextHint(st: RunState): string {
     case "paused_quota":
       return `\nrun ${st.runId} paused: quota exhausted for ${st.pause?.workerId}${st.pause?.resetsAt ? `, resets at ${new Date(st.pause.resetsAt).toLocaleString()}` : ""}. Resume with: fractory resume ${st.runId}\n`;
     case "awaiting_approval":
+      if (st.workflow === "review") {
+        return `\nrun ${st.runId}: the reviewer maintains these findings and the implementer disagrees:\n${(st.approval?.items ?? []).map((it, i) => formatItem(it, i + 1)).join("\n")}\n\nPick the findings to apply (the rest are dismissed): fractory approve ${st.runId} --items 1,3   (--items "" dismisses all; then: fractory resume ${st.runId})\n`;
+      }
       return `\nrun ${st.runId} awaits approval of these items:\n${(st.approval?.items ?? []).map((it, i) => formatItem(it, i + 1)).join("\n")}\n\nApprove a subset: fractory approve ${st.runId} --items 1,3   (then: fractory resume ${st.runId})\n`;
     case "needs_attention":
       return `\nrun ${st.runId} needs attention: the main repository changed during a step (${st.attention?.changes.map((c) => c.path).join(", ")}).\nContinue: fractory resume ${st.runId}   Abort: fractory cancel ${st.runId}\n`;

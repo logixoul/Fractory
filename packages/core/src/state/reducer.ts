@@ -22,7 +22,12 @@ export function reduceInto(state: RunState | null, ev: RunEvent): RunState {
       promptFile: ev.promptFile,
       promptSha256: ev.promptSha256,
       labels: { ...ev.labels },
-      roles: { contestants: [...ev.roles.contestants], judge: ev.roles.judge },
+      roles: {
+        contestants: [...ev.roles.contestants],
+        judge: ev.roles.judge,
+        ...(ev.roles.implementer !== undefined ? { implementer: ev.roles.implementer } : {}),
+        ...(ev.roles.reviewer !== undefined ? { reviewer: ev.roles.reviewer } : {}),
+      },
       seed: ev.seed,
       config: ev.config,
       createdAt: ev.ts,
