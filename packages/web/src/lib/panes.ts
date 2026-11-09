@@ -1,3 +1,4 @@
+import { stepTiming, type StepTiming, type TimingEvent } from "@fractory/shared/timing";
 import type { RunEvent, RunState, WorkerEvent } from "./types.js";
 
 /** Normalized events grouped into one pane per worker (live run view). Pure; unit-tested. */
@@ -26,6 +27,8 @@ export interface StepBlock {
   attempt: number;
   status: "running" | "completed" | "failed" | "abandoned";
   detail?: string;
+  /** Recorded at the step's end (step_timing), or computed live while it runs. */
+  timing?: StepTiming;
   items: PaneItem[];
 }
 
@@ -46,7 +49,8 @@ export function paneKey(stepId: string, workerId: string | undefined, label: str
   return ORCH;
 }
 
-export function buildPanes(events: readonly RunEvent[], labels: Record<string, string>): Pane[] {
+/** `now` (epoch ms) times running steps; default: the clock. */
+export function buildPanes(events: readonly RunEvent[], labels: Record<string, string>, now: number = Date.now()): Pane[] {
   const panes = new Map<string, Pane>();
   const blocks = new Map<string, StepBlock>(); // `${stepId}#${attempt}`
   const toolIndex = new Map<string, Extract<PaneItem, { kind: "tool" }>>();
@@ -84,6 +88,9 @@ export function buildPanes(events: readonly RunEvent[], labels: Record<string, s
       case "step_abandoned":
         b.status = "abandoned";
         break;
+      case "step_timing":
+        b.timing = (e as { timing: StepTiming }).timing;
+        break;
       case "step_retrying":
         b.items.push({ kind: "retry", text: `transient failure, retrying the step in ${((e as { delayMs: number }).delayMs / 1000).toFixed(0)}s: ${(e as { reason: string }).reason}` });
         break;
@@ -93,6 +100,12 @@ export function buildPanes(events: readonly RunEvent[], labels: Record<string, s
       case "worker_event":
         addWorkerEvent(b, (e as { event: WorkerEvent }).event, toolIndex);
         break;
+    }
+  }
+  for (const b of blocks.values()) {
+    if (b.status === "running" && !b.timing) {
+      const t = stepTiming(events as readonly TimingEvent[], b.stepId, b.attempt, now);
+      if (t) b.timing = t;
     }
   }
   return [...panes.values()].filter((p) => p.steps.length > 0 || Object.values(labels).includes(p.key));

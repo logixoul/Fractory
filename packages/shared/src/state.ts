@@ -1,5 +1,6 @@
 // Derived run state (state.json) shapes, shared by core (reducer) and the GUI.
 import type { StepFailureKind, Workflow } from "./run-events.js";
+import type { StepTiming } from "./timing.js";
 import type { UsageTokens } from "./worker-events.js";
 
 export type RunStatus =
@@ -29,6 +30,8 @@ export interface StepState {
   checkpoint?: string;
   toolCalls: number;
   toolBlocked: number;
+  /** Timing breakdown of the latest finished attempt (step_timing). */
+  timing?: StepTiming;
 }
 
 export interface WorkerTotals {

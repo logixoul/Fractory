@@ -10,7 +10,8 @@
     ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
     "./events": { "types": "./dist/events.d.ts", "default": "./dist/events.js" },
     "./state": { "types": "./dist/state.d.ts", "default": "./dist/state.js" },
-    "./refs": { "types": "./dist/refs.d.ts", "default": "./dist/refs.js" }
+    "./refs": { "types": "./dist/refs.d.ts", "default": "./dist/refs.js" },
+    "./timing": { "types": "./dist/timing.d.ts", "default": "./dist/timing.js" }
   },
   "dependencies": {
     "zod": "^4.6.7"

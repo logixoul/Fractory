@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Opt-in REAL-MODEL smoke test. Never run by `npm test`. You run it by hand:
 //   npm run build && node scripts/smoke-real.mjs [--claude] [--pi] [--glm] [--gpt] [--opus]
-// Default: all three (Claude, and DeepSeek and the GLM-5.3 Flash judge via Pi on Baseten); Claude uses --model haiku (conserve Pro quota), --opus for Opus. All use the default reasoning (medium; the GLM judge high).
+// Default: Claude, both DeepSeek builds (Fast for the duel, 1017 for consensus) and the GLM-5.3 Flash judge via Pi on Baseten; Claude uses --model haiku (conserve Pro quota), --opus for Opus. All use the default reasoning (medium; the GLM judge high).
 // Pi needs BASETEN_API_KEY in the global config's envFile (else .dev.vars in the repo root).
 // Cost: one tiny call per worker.
-// --gpt (opt-in, not part of the default set): the review workflow's reviewer, gpt-6.1-sol via
+// --gpt (opt-in, not part of the default set): gpt-6.1-sol (review reviewer, consensus contestant) via
 // Pi's openai provider; needs OPENAI_API_KEY in the same file.
 //
 // Each worker gets a read-only task in a fresh worktree of a scratch repo, with a sibling
@@ -110,7 +110,7 @@ if (want.claude) {
   const cfg = ClaudeWorkerConfig.parse({ ...defaults.opus, model: argv.has("--opus") ? "opus" : "haiku" });
   await smoke("claude", new ClaudeWorker("claude", cfg, { redactor, withholdEnv: Object.keys(secretEnv) }));
 }
-for (const [flag, id] of [["pi", "deepseek"], ["glm", "glm"], ["gpt", "gpt"]]) {
+for (const [flag, id] of [["pi", "deepseek"], ["pi", "deepseek-std"], ["glm", "glm"], ["gpt", "gpt"]]) {
   if (!want[flag]) continue;
   const piKey = PiWorkerConfig.parse(defaults[id]).passEnv[0];
   if (!secretEnv[piKey]) {

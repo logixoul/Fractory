@@ -2,7 +2,12 @@
 // Accepted forms: `src/a.ts:42`, `src/a.ts:42-50`, `src\a.ts:42`, absolute paths
 // (`C:\…\repo\src\a.ts:42`, `/home/…/a.ts:42`) and markdown `src/a.ts#L42`.
 
-const SEG = String.raw`[\w@+\-.]+`;
+// A path segment: word chars, @ + - . and, as balanced groups only, route syntax such as
+// SvelteKit/Next.js `[uid]`, `[...rest]`, `[[optional]]`, `[page=integer]` and `(group)`.
+// Unbalanced brackets never join a path, so `(src/a.ts:42)` and `[text](src/a.ts:42)` still
+// yield `src/a.ts:42`.
+const CH = String.raw`[\w@+\-.]`;
+const SEG = String.raw`(?:${CH}|\[\[[\w@+\-.=]+\]\]|\[[\w@+\-.=]+\]|\([\w@+\-.]+\))+`;
 const SEP = String.raw`[\\/]`;
 export const REF_RE = new RegExp(
   String.raw`((?:[A-Za-z]:${SEP}|${SEP})?(?:${SEG}${SEP})*${SEG})(?::(\d+)(?:[-–](\d+))?|#L(\d+)(?:-L?(\d+))?)`,
@@ -99,8 +104,14 @@ export function sideMentioned(text: string): "A" | "B" | undefined {
 
 /** In-app link for a resolved ref: `#ref/<label|base>/<sha>/<line>-<end>/<path>`. */
 export function refHref(r: Pick<ResolvedRef, "label" | "sha" | "line" | "endLine" | "path">): string {
-  return `#ref/${r.label ?? "base"}/${r.sha}/${r.line}-${r.endLine ?? r.line}/${r.path.split("/").map(encodeURIComponent).join("/")}`;
+  return `#ref/${r.label ?? "base"}/${r.sha}/${r.line}-${r.endLine ?? r.line}/${r.path.split("/").map(encodeSegment).join("/")}`;
 }
+
+/** encodeURIComponent plus ( ) and ', so route groups like `(app)` cannot end a markdown link early. */
+const encodeSegment = (s: string) => encodeURIComponent(s).replace(/[()']/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+
+/** Markdown link text: brackets in paths like `[uid]` are escaped so they cannot close the text. */
+const linkText = (s: string) => s.replace(/[[\]\\]/g, (c) => `\\${c}`);
 
 /**
  * A duel item's evidence as markdown (report.md and the GUI): each resolved ref links to its own
@@ -110,7 +121,7 @@ export function evidenceMarkdown(evidence: readonly string[], refs: readonly Res
   const parts = refs.map((r) => {
     const who = labels[r.label!] ?? r.label;
     const where = r.side === "base" ? "base" : r.side === "head" ? `${who} head` : `${r.side}, ${who}`;
-    return `[${r.raw}](${refHref(r)}) (${where} @ ${r.sha.slice(0, 7)}${r.ambiguous ? ", ambiguous" : ""})`;
+    return `[${linkText(r.raw)}](${refHref(r)}) (${where} @ ${r.sha.slice(0, 7)}${r.ambiguous ? ", ambiguous" : ""})`;
   });
   const unresolved = evidence.filter((e) => !refs.some((r) => e.includes(r.raw)));
   return [...parts, ...unresolved.map((e) => `\`${e}\` (unresolved)`)].join(", ");

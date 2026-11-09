@@ -30,6 +30,30 @@ describe("path:line refs", () => {
   });
 });
 
+describe("path:line refs in route-style paths", () => {
+  it("validates SvelteKit/Next.js paths, POSIX and Windows separators, relative and absolute", () => {
+    const root = fs.realpathSync.native(tmpDir());
+    const files = [
+      "src/routes/admin/students/[uid]/+page.svelte",
+      "src/routes/docs/[...rest]/+page.ts",
+      "src/routes/(app)/settings/+layout.svelte",
+      "src/routes/[[lang]]/+page.svelte",
+    ];
+    for (const f of files) {
+      fs.mkdirSync(path.join(root, path.dirname(f)), { recursive: true });
+      fs.writeFileSync(path.join(root, f), Array.from({ length: 1400 }, (_, i) => `l${i + 1}`).join("\n") + "\n");
+    }
+    const text = files
+      .flatMap((f) => [`${f}:1351-1353`, `${f.replace(/\//g, "\\")}:2`, `${path.join(root, ...f.split("/"))}:3`])
+      .join(" and ");
+    const r = checkRefs(text, root);
+    expect(r.invalid).toEqual([]);
+    expect(r.valid.map((x) => `${x.path}:${x.line}`)).toEqual(files.flatMap((f) => [`${f}:1351`, `${f}:2`, `${f}:3`]));
+    // the reported bug: the path was cut to "/+page.svelte" and flagged invalid
+    expect(checkRefs("src/routes/admin/students/[uid]/+page.svelte:1351-1353", root).valid[0]).toMatchObject({ path: "src/routes/admin/students/[uid]/+page.svelte", line: 1351, endLine: 1353 });
+  });
+});
+
 describe("anonymization (§8.16)", () => {
   const s = buildScrubber(DEFAULT_ANONYMIZE_PATTERNS, ["claude-opus-5", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "opus"], "[agent]");
 

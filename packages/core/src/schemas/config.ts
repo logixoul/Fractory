@@ -76,6 +76,10 @@ export const DEFAULT_ANONYMIZE_PATTERNS = [
   "\\bAnthropic\\b",
   "\\bDeepSeek\\b",
   "\\bOpus\\b",
+  "\\bChatGPT\\b",
+  "\\bGPT\\b",
+  "\\bOpenAI\\b",
+  "\\bCodex\\b",
   "\\bpi-coding-agent\\b",
 ];
 
@@ -132,6 +136,9 @@ export const Config = z
       .object({
         maxRounds: z.number().int().min(0).max(10).default(1),
         minRefs: z.number().int().min(0).default(3),
+        /** Consensus runs use their own lineup (not roles.contestants/judge, which duel uses). */
+        contestants: z.tuple([z.string(), z.string()]).default(["gpt", "deepseek-std"]),
+        judge: z.string().default("opus"),
       })
       .prefault({}),
     duel: z
@@ -216,6 +223,13 @@ export const Config = z
       }
     }
     if (!ids.has(c.roles.judge)) ctx.addIssue({ code: "custom", path: ["roles", "judge"], message: `unknown worker '${c.roles.judge}'` });
+    c.consensus.contestants.forEach((id, i) => {
+      if (!ids.has(id)) ctx.addIssue({ code: "custom", path: ["consensus", "contestants", i], message: `unknown worker '${id}'` });
+    });
+    if (c.consensus.contestants[0] === c.consensus.contestants[1]) {
+      ctx.addIssue({ code: "custom", path: ["consensus", "contestants"], message: "contestants must be two different workers" });
+    }
+    if (!ids.has(c.consensus.judge)) ctx.addIssue({ code: "custom", path: ["consensus", "judge"], message: `unknown worker '${c.consensus.judge}'` });
     c.anonymize.patterns.forEach((p, i) => {
       try {
         new RegExp(p, "gi");
@@ -280,6 +294,8 @@ export const DEFAULT_CONFIG_INPUT = {
     opus: { kind: "claude", model: "opus", effort: "medium" },
     // Baseten's "Fast" variant: same weights, dedicated capacity for higher throughput, 2× price.
     deepseek: { kind: "pi", provider: "baseten", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast", thinking: "medium" },
+    // Consensus contestant: the standard (non-Fast) build, half the price, shared capacity.
+    "deepseek-std": { kind: "pi", provider: "baseten", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017", thinking: "medium" },
     // Judge from a third model family (not a contestant), to avoid self-preference; Flash for cost.
     // "high", explicitly: GLM-5.3 Flash on Baseten has low/high/max only (Pi would map medium to high).
     glm: { kind: "pi", provider: "baseten", model: "zai-org/GLM-5.3-Flash", thinking: "high" },
@@ -288,6 +304,8 @@ export const DEFAULT_CONFIG_INPUT = {
   },
   roles: { contestants: ["opus", "deepseek"], judge: "glm", implementer: "opus", reviewer: "gpt" },
   prices: {
+    // Pi 1.5.0's Baseten catalog (checked 2026-11-10): half the Fast price.
+    "baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017": { input: 0.3, output: 1.2, cacheRead: 0.007, source: BASETEN_PRICES, checkedAt: "2026-11-10" },
     "baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast": { input: 0.6, output: 2.4, cacheRead: 0.014, source: BASETEN_PRICES, checkedAt: "2026-11-09" },
     "baseten/zai-org/GLM-5.3-Flash": { input: 0.15, output: 0.5, cacheRead: 0.03, source: BASETEN_PRICES, checkedAt: "2026-11-09" },
     // Prompts up to 272k tokens (the model's context window in Pi's catalog). No cacheWrite: OpenAI caching is automatic.

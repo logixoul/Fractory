@@ -18,6 +18,24 @@ describe("panes", () => {
     expect(paneKey("setup", undefined, undefined, labels)).toBe("orchestrator");
   });
 
+  it("step timing: the recorded step_timing for finished steps, computed live (up to now) for running ones", () => {
+    seq = 0;
+    const t = (s: number) => `2026-11-09T00:00:${String(s).padStart(2, "0")}.000Z`;
+    const recorded = { wallMs: 9000, workerMs: 8000, toolMs: 1000, generationMs: 7000, orchestratorMs: 1000, toolCalls: 2, toolRounds: 1, outputTokens: 700, reasoningTokens: null, inputTokens: 10, invocations: [] };
+    const events = [
+      ev({ type: "step_started", stepId: "propose.a1b2", attempt: 1, workerId: "opus", label: "a1b2" }),
+      ev({ type: "step_timing", stepId: "propose.a1b2", attempt: 1, timing: recorded }),
+      ev({ type: "step_completed", stepId: "propose.a1b2", attempt: 1, durationMs: 9000 }),
+      { ...ev({ type: "step_started", stepId: "judge", attempt: 1, workerId: "glm" }), ts: t(10) },
+      { ...ev({ type: "worker_event", stepId: "judge", attempt: 1, event: { type: "start" } }), ts: t(10) },
+      { ...ev({ type: "worker_event", stepId: "judge", attempt: 1, event: { type: "tool_call", id: "x", name: "Read", input: {} } }), ts: t(12) },
+      { ...ev({ type: "worker_event", stepId: "judge", attempt: 1, event: { type: "tool_result", id: "x", isError: false, output: "" } }), ts: t(15) },
+    ] as RunEvent[];
+    const panes = buildPanes(events, labels, Date.parse(t(20)));
+    expect(panes.find((p) => p.key === "opus")!.steps[0]!.timing).toEqual(recorded);
+    expect(panes.find((p) => p.key === "judge")!.steps[0]!.timing).toMatchObject({ wallMs: 10_000, toolMs: 3_000, generationMs: 7_000, toolCalls: 1, toolRounds: 1 });
+  });
+
   it("merges text deltas, pairs tool calls with results and blocks, records status", () => {
     seq = 0;
     const events = [

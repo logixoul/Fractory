@@ -1,4 +1,5 @@
 export * from "./version.js";
+export { formatTiming, stepTiming, StepTiming, InvocationTiming } from "@fractory/shared/timing";
 
 export * from "./paths.js";
 export * from "./schemas/config.js";

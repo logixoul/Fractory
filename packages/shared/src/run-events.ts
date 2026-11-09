@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { StepTiming } from "./timing.js";
 import { QuotaWindow, UsageTokens, WorkerEvent } from "./worker-events.js";
 
 export const Workflow = z.enum(["consensus", "duel", "review", "test"]);
@@ -71,6 +72,8 @@ export const RunEvent = z.discriminatedUnion("type", [
     durationMs: z.number().nonnegative(),
   }),
   z.object({ ...base, type: z.literal("step_failed"), ...stepRef, kind: StepFailureKind, reason: z.string() }),
+  /** Recorded right before a step attempt ends (completed, failed, quota, cancelled). */
+  z.object({ ...base, type: z.literal("step_timing"), ...stepRef, timing: StepTiming }),
   z.object({ ...base, type: z.literal("step_abandoned"), ...stepRef }),
   z.object({ ...base, type: z.literal("checkpoint_created"), stepId: STEP_ID, label: z.string(), sha: z.string() }),
   z.object({

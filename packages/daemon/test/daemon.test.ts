@@ -24,7 +24,7 @@ function repo(): string {
   fs.writeFileSync(path.join(r, "math.js"), "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n");
   git("add", "-A");
   git("commit", "-q", "-m", "init");
-  fs.writeFileSync(path.join(r, "fractory.config.json"), JSON.stringify({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" } }, judge: { swapOrderPass: false } }));
+  fs.writeFileSync(path.join(r, "fractory.config.json"), JSON.stringify({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" } }, consensus: { contestants: ["opus", "deepseek"], judge: "glm" }, judge: { swapOrderPass: false } }));
   return r;
 }
 

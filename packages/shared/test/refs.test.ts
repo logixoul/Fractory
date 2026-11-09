@@ -11,6 +11,41 @@ describe("shared refs", () => {
     ]);
   });
 
+  it("keeps route-syntax segments ([param], [...rest], [[optional]], [p=matcher], (group), +page) on POSIX and Windows separators", () => {
+    const paths = [
+      "src/routes/admin/students/[uid]/+page.svelte",
+      "src/routes/docs/[...rest]/+page.ts",
+      "src/routes/(app)/settings/+layout.svelte",
+      "src/routes/[[lang]]/about/+page.svelte",
+      "src/routes/items/[page=integer]/+page.server.ts",
+      "app/(marketing)/(.)photo/[id]/page.tsx",
+    ];
+    for (const p of paths) {
+      for (const written of [p, p.replace(/\//g, "\\"), `C:\\repo\\${p.replace(/\//g, "\\")}`, `/home/u/repo/${p}`]) {
+        expect(findRefs(`see ${written}:1351-1353 now`).map((r) => [r.path, r.line, r.endLine])).toEqual([[written, 1351, 1353]]);
+        expect(findRefs(`(${written}:7)`).map((r) => r.path)).toEqual([written]);
+      }
+    }
+  });
+
+  it("unbalanced brackets and markdown link syntax never join a path", () => {
+    expect(findRefs("(src/a.ts:42)").map((r) => r.raw)).toEqual(["src/a.ts:42"]);
+    expect(findRefs("[text](src/a.ts:42)").map((r) => r.raw)).toEqual(["src/a.ts:42"]);
+    expect(findRefs("[src/a.ts:42](src/b.ts:1)").map((r) => r.raw)).toEqual(["src/a.ts:42", "src/b.ts:1"]);
+    expect(findRefs("see [a.ts:3] and (b.ts:4), c.ts:5.").map((r) => r.raw)).toEqual(["a.ts:3", "b.ts:4", "c.ts:5"]);
+    expect(findRefs("src/[uid/+page.svelte:3").map((r) => r.path)).toEqual(["uid/+page.svelte"]); // unclosed: not a segment
+  });
+
+  it("in-app links and evidence markdown survive brackets and parentheses in paths", () => {
+    const sha = "b".repeat(40);
+    const p = "src/routes/(app)/students/[uid]/+page.svelte";
+    const r: ResolvedRef = { raw: `${p}:3`, path: p, line: 3, side: "A", label: "a1b2", sha, ambiguous: false, chosenBy: "evidence", resolvedIn: ["A"] };
+    const href = refHref(r);
+    expect(href).toBe(`#ref/a1b2/${sha}/3-3/src/routes/%28app%29/students/%5Buid%5D/%2Bpage.svelte`);
+    expect(parseRefHref(href)?.path).toBe(p);
+    expect(evidenceMarkdown([r.raw], [r], { a1b2: "gpt" })).toBe(`[src/routes/(app)/students/\\[uid\\]/+page.svelte:3](${href}) (A, gpt @ bbbbbbb)`);
+  });
+
   it("detects which side a text attributes something to", () => {
     expect(sideMentioned("B: math.js:3")).toBe("B");
     expect(sideMentioned("see side A for the guard")).toBe("A");

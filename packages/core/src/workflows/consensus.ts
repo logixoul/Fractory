@@ -13,9 +13,14 @@ import { leakCheck, relativizePaths, scrubProse } from "../text/anonymize.js";
 import { loadProjectContext } from "../text/context.js";
 import { checkRefs } from "../text/refs.js";
 import { randomHex, seededShuffle } from "../util/random.js";
-import { copyInput, judgeScrubber, labelsOf, promptText, res, runSwapPass, sha256, writeOut } from "./common.js";
+import { copyInput, judgeScrubber, labelsOf, promptText, res, runConsensusSwapPass, sha256, writeInput, writeOut } from "./common.js";
 
 const sameLabels = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+/** The judge's verdict after the swap pass: decisions may carry `attributionUnstable`. */
+export type DecisionVerdict = Omit<ConsensusVerdict, "decisions"> & {
+  decisions: (ConsensusVerdict["decisions"][number] & { attributionUnstable?: boolean })[];
+};
 
 /**
  * Consensus workflow (spec "Workflow 1"), all phases read-only:
@@ -93,6 +98,57 @@ export function consensusWorkflow(env: ConsensusEnv): WorkflowDef {
 }
 
 /** Latest proposal of a label: last completed revision that changed something, else the original. */
+/** A label's revision rounds so far, in order. */
+export function revisionHistory(st: RunState, label: string): { round: number; noChanges: boolean; changeSummary: string }[] {
+  const out: { round: number; noChanges: boolean; changeSummary: string }[] = [];
+  for (let n = 1; ; n++) {
+    const r = res<ReviseStepResult>(st, `revise.r${n}.${label}`);
+    if (!r) return out;
+    out.push({ round: n, noChanges: r.noChanges, changeSummary: r.changeSummary });
+  }
+}
+
+/** Which draft a label's current proposal is: the original, or the revision of round n. */
+export function draftName(history: { round: number; noChanges: boolean }[]): string {
+  const last = [...history].reverse().find((h) => !h.noChanges);
+  return last ? `revised in round ${last.round} of ${history.length}` : history.length ? `the original, unchanged through ${history.length} revision round(s)` : "the original (no revision rounds ran)";
+}
+
+export function renderRevisions(side: "A" | "B", history: { round: number; noChanges: boolean; changeSummary: string }[]): string {
+  const out = [`# Revisions of proposal ${side}`, ""];
+  if (history.length === 0) out.push("No revision rounds ran: the proposal is the original draft.");
+  for (const h of history) {
+    const summary = h.changeSummary.trim() || "(no summary given)";
+    out.push(`## Round ${h.round}: ${h.noChanges ? "no changes" : "revised"}`, "", summary, "");
+  }
+  return out.join("\n").trimEnd() + "\n";
+}
+
+interface JudgeFiles {
+  task: string;
+  A: string;
+  B: string;
+  revA: string;
+  revB: string;
+  critA: string;
+  critB: string;
+  draftA: string;
+  draftB: string;
+}
+
+/** The judge's (and swap pass's) file list; each critique is labelled with the draft it targets. */
+function judgeFileList(f: JudgeFiles): string {
+  return [
+    `- task: ${f.task}`,
+    `- proposal A (final version: ${f.draftA}): ${f.A}`,
+    `- proposal B (final version: ${f.draftB}): ${f.B}`,
+    `- A's revision summaries (what A changed after the critiques): ${f.revA}`,
+    `- B's revision summaries (what B changed after the critiques): ${f.revB}`,
+    `- A's critique of B, targeting B's ORIGINAL proposal (before any revision): ${f.critA}`,
+    `- B's critique of A, targeting A's ORIGINAL proposal (before any revision): ${f.critB}`,
+  ].join("\n");
+}
+
 export function currentProposal(st: RunState, label: string): TextStepResult {
   let cur = res<TextStepResult>(st, `propose.${label}`)!;
   for (let n = 1; ; n++) {
@@ -316,17 +372,23 @@ function judgeStep(env: ConsensusEnv, st: RunState, setup: SetupResult): WorkSte
       };
       // The user's own task text is passed verbatim: exempt from scrub and leak check.
       const taskFile = copyInput(ctx, "task.md", path.join(ctx.run.dir, "prompt.md"));
-      const sideFiles = (prefix: string, a: string, b: string) => ({
+      const sideFiles = (prefix: string, a: string, b: string): JudgeFiles => ({
+        task: taskFile,
         A: copyInput(ctx, `${prefix}proposal-A.md`, currentProposal(st, a).file, clean),
         B: copyInput(ctx, `${prefix}proposal-B.md`, currentProposal(st, b).file, clean),
+        revA: writeInput(ctx, `${prefix}revisions-A.md`, clean(renderRevisions("A", revisionHistory(st, a)))),
+        revB: writeInput(ctx, `${prefix}revisions-B.md`, clean(renderRevisions("B", revisionHistory(st, b)))),
         critA: copyInput(ctx, `${prefix}critique-by-A.md`, res<TextStepResult>(st, `critique.${a}`)!.file, clean),
         critB: copyInput(ctx, `${prefix}critique-by-B.md`, res<TextStepResult>(st, `critique.${b}`)!.file, clean),
+        draftA: draftName(revisionHistory(st, a)),
+        draftB: draftName(revisionHistory(st, b)),
       });
-      const files = { task: taskFile, ...sideFiles("", la, lb) };
+      const files = sideFiles("", la, lb);
       // Swap pass inputs must exist before the step's inputs/ baseline is taken (§8.19).
       const swapped = cfg.judge.swapOrderPass ? sideFiles("swap/", lb, la) : undefined;
       const forbidden = [env.dataDir, ...roots];
-      for (const f of [files.A, files.B, files.critA, files.critB, ...(swapped ? Object.values(swapped) : [])]) {
+      const scanned = (f: JudgeFiles) => [f.A, f.B, f.revA, f.revB, f.critA, f.critB];
+      for (const f of [...scanned(files), ...(swapped ? scanned(swapped) : [])]) {
         const hits = leakCheck(fs.readFileSync(f, "utf8"), scrubber, forbidden);
         if (hits.length > 0) throw new StepFailure("integrity", `anonymization leak check failed for ${path.basename(f)}: ${hits.length} pattern(s) still match`);
       }
@@ -334,11 +396,9 @@ function judgeStep(env: ConsensusEnv, st: RunState, setup: SetupResult): WorkSte
       const cwd = setup.worktrees[setup.judgeLabel]!;
       const prompt = [
         "You are the judge. Two anonymous engineers, A and B, independently wrote proposals for the task below and critiqued each other's proposal. Read these files with your read tool:",
-        `- task: ${files.task}`,
-        `- proposal A: ${files.A}`,
-        `- proposal B: ${files.B}`,
-        `- A's critique of B: ${files.critA}`,
-        `- B's critique of A: ${files.critB}`,
+        judgeFileList(files),
+        "",
+        "Each critique was written against the other side's ORIGINAL proposal, before any revision; the revision summaries say what each side changed afterwards, so a criticised point may already be addressed in the final proposal.",
         "",
         "The repository in your working directory is the code they refer to (read-only). Verify claims against the code before relying on them; the order of A and B is random and carries no meaning.",
         "Produce: a summary of the recommended plan; decisions (each with its rationale, which side it is based on, and path:line evidence you verified); and an explicit list of unresolved disagreements the evidence does not settle.",
@@ -362,25 +422,38 @@ function judgeStep(env: ConsensusEnv, st: RunState, setup: SetupResult): WorkSte
           bad = invalidEvidence(r.value, cwd, roots);
         }
         if (bad.undecided.length > 0) throw new StepFailure("exit_check", `judge decisions without valid evidence: ${bad.undecided.join("; ")}`);
-        let verdict = r.value;
+        let verdict: DecisionVerdict = r.value;
         let dropped: ConsensusVerdict["decisions"] = [];
         if (swapped) {
-          // Second pass with A/B swapped (fresh session); keep decisions both passes attribute alike.
-          const ratings = await runSwapPass(ctx, {
+          // Second pass with A/B swapped (fresh session). It checks the decision, not who gets the
+          // credit: a decision survives if that pass adopts it too (any attribution). An adopted
+          // decision whose attribution maps to different contestants is kept, marked attributionUnstable.
+          const second = await runConsensusSwapPass(ctx, {
             judgeId,
             cwd,
             timeoutMs: cfg.timeouts.judgeMs,
-            fileList: [`- task: ${files.task}`, `- proposal A: ${swapped.A}`, `- proposal B: ${swapped.B}`, `- A's critique of B: ${swapped.critA}`, `- B's critique of A: ${swapped.critB}`].join("\n"),
-            points: verdict.decisions.map((d, i) => ({ index: i + 1, text: `${d.topic}: ${d.decision}` })),
+            fileList: judgeFileList(swapped),
+            decisions: verdict.decisions.map((d, i) => ({ index: i + 1, text: `${d.topic}: ${d.decision}` })),
           });
-          const keep = verdict.decisions.filter((d, i) => {
-            const second = ratings.get(i + 1);
-            return second !== undefined && sameLabels(labelsOf(d.basedOn, la, lb), labelsOf(second, lb, la));
+          const keep: DecisionVerdict["decisions"] = [];
+          verdict.decisions.forEach((d, i) => {
+            const s = second.get(i + 1);
+            if (!s?.adopt) return dropped.push(d);
+            const stable = sameLabels(labelsOf(d.basedOn, la, lb), labelsOf(s.side, lb, la));
+            keep.push(stable ? d : { ...d, attributionUnstable: true });
           });
-          dropped = verdict.decisions.filter((d) => !keep.includes(d));
+          const unstable = keep.filter((d) => d.attributionUnstable).length;
+          if (unstable > 0) {
+            ctx.record({
+              type: "warning",
+              code: "attribution_unstable",
+              stepId: ctx.stepId,
+              message: `${unstable} decision(s) were adopted in both passes but credited to different sides; kept and marked attribution-unstable`,
+            });
+          }
           if (keep.length === 0) {
-            // Not a failure: there are no order-robust preferences. Continue with an empty verdict.
-            ctx.record({ type: "warning", code: "no_robust_preferences", stepId: ctx.stepId, message: "the swapped-order judge pass agreed with none of the first pass's decisions; the verdict has no decisions" });
+            // Not a failure: no decision is order-robust. Continue with an empty verdict.
+            ctx.record({ type: "warning", code: "no_robust_preferences", stepId: ctx.stepId, message: "the swapped-order judge pass adopted none of the first pass's decisions; the verdict has no decisions" });
           }
           verdict = { ...verdict, decisions: keep };
         }
@@ -394,9 +467,9 @@ function judgeStep(env: ConsensusEnv, st: RunState, setup: SetupResult): WorkSte
       const j = r as JudgeResult;
       const saved = JSON.parse(fs.readFileSync(j.decisionJson, "utf8")) as { verdict: unknown; noRobustPreferences?: boolean };
       // An empty verdict is valid only as the recorded outcome of the swapped-order pass.
-      const schema = saved.noRobustPreferences
-        ? ConsensusVerdict.extend({ decisions: z.array(ConsensusVerdict.shape.decisions.element).length(0) })
-        : ConsensusVerdict;
+      // Saved decisions are the judge's plus the orchestrator's optional attributionUnstable mark.
+      const decision = ConsensusVerdict.shape.decisions.element.extend({ attributionUnstable: z.boolean().optional() });
+      const schema = ConsensusVerdict.extend({ decisions: saved.noRobustPreferences ? z.array(decision).length(0) : z.array(decision).min(1) });
       const ok = fs.existsSync(j.decisionMd) && schema.safeParse(saved.verdict).success;
       return ok ? { ok: true } : { ok: false, reason: "decision.md/decision.json missing or invalid" };
     },
@@ -414,7 +487,7 @@ function invalidEvidence(v: ConsensusVerdict, root: string, roots: string[]) {
   return { invalid, undecided };
 }
 
-export function renderDecision(v: ConsensusVerdict, sides: JudgeResult["sides"], invalid: string[], dropped: ConsensusVerdict["decisions"] = []): string {
+export function renderDecision(v: DecisionVerdict, sides: JudgeResult["sides"], invalid: string[], dropped: ConsensusVerdict["decisions"] = []): string {
   const side = (s: string) => (s === "A" || s === "B" ? `${s} (${sides[s].workerId})` : s);
   const out = [
     "# Decision",
@@ -427,16 +500,16 @@ export function renderDecision(v: ConsensusVerdict, sides: JudgeResult["sides"],
     "",
   ];
   if (v.decisions.length === 0) {
-    out.push("No robust preferences: with A and B swapped, the judge agreed with none of its first-pass decisions.", "");
+    out.push("No robust preferences: with A and B swapped, the judge adopted none of its first-pass decisions.", "");
   }
   v.decisions.forEach((d, i) => {
-    out.push(`### ${i + 1}. ${d.topic}`, "", d.decision, "", `*Rationale:* ${d.rationale}`, "", `*Based on:* ${side(d.basedOn)}`, "", `*Evidence:* ${d.evidence.map((e) => `\`${e}\``).join(", ")}`, "");
+    out.push(`### ${i + 1}. ${d.topic}`, "", d.decision, "", `*Rationale:* ${d.rationale}`, "", `*Based on:* ${side(d.basedOn)}${d.attributionUnstable ? " (attribution unstable: with A and B swapped, the judge adopted this decision but credited it differently)" : ""}`, "", `*Evidence:* ${d.evidence.map((e) => `\`${e}\``).join(", ")}`, "");
   });
   out.push("## Unresolved disagreements", "");
   if (v.unresolved.length === 0) out.push("None.", "");
   for (const u of v.unresolved) out.push(`- **${u.topic}**: A: ${u.positionA} / B: ${u.positionB}. ${u.whyUnresolved}`);
   if (dropped.length) {
-    out.push("", "## Dropped by the swapped-order pass", "", "The judge rated these differently when A and B were swapped, so they are not decisions:", "");
+    out.push("", "## Dropped by the swapped-order pass", "", "With A and B swapped, the judge did not adopt these, so they are not decisions:", "");
     for (const d of dropped) out.push(`- **${d.topic}**: ${d.decision}`);
   }
   if (invalid.length) out.push("", `> ${invalid.length} cited reference(s) could not be validated: ${invalid.slice(0, 30).map((e) => `\`${e}\``).join(", ")}`);

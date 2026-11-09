@@ -36,6 +36,9 @@ export async function createRun(store: RunStore, o: CreateRunOptions): Promise<R
   } catch {
     throw new Error(`${o.repo} is not inside a git repository`);
   }
+  // Consensus has its own lineup (config.consensus); duel and review use config.roles.
+  const roles =
+    o.workflow === "consensus" ? { ...o.config.roles, contestants: o.config.consensus.contestants, judge: o.config.consensus.judge } : o.config.roles;
   const prompt = fs.readFileSync(o.promptFile);
   if (prompt.toString("utf8").trim() === "") throw new Error(`prompt file ${o.promptFile} is empty`);
   const run = store.create({
@@ -43,8 +46,8 @@ export async function createRun(store: RunStore, o: CreateRunOptions): Promise<R
     repo,
     promptFile: path.resolve(o.promptFile),
     promptSha256: createHash("sha256").update(prompt).digest("hex"),
-    labels: newLabels(o.workflow === "review" ? [o.config.roles.implementer, o.config.roles.reviewer] : o.config.roles.contestants),
-    roles: o.config.roles,
+    labels: newLabels(o.workflow === "review" ? [roles.implementer, roles.reviewer] : roles.contestants),
+    roles,
     seed: randomSeed(),
     config: JSON.parse(JSON.stringify(o.config)),
     fractoryVersion: FRACTORY_VERSION,

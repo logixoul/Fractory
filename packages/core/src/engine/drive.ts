@@ -1,4 +1,5 @@
 import * as os from "node:os";
+import { stepTiming } from "@fractory/shared/timing";
 import type { StepFailureKind } from "../schemas/run-events.js";
 import { TERMINAL_STATUSES, type RunState } from "../state/reducer.js";
 import type { RunHandle } from "../store/run-store.js";
@@ -288,6 +289,7 @@ async function runStepAttempt(
     ...(step.workerId !== undefined ? { workerId: step.workerId } : {}),
     ...(step.label !== undefined ? { label: step.label } : {}),
   });
+  const startedSeq = run.state().lastSeq - 1; // events(startedSeq) begins at this step_started
   const ac = new AbortController();
   const abort = () => ac.abort();
   runSignal.addEventListener("abort", abort, { once: true });
@@ -313,7 +315,19 @@ async function runStepAttempt(
       runWorkerTask({ run, stepId: step.id, attempt, workerId, options, signal: ac.signal, deps, now }),
   };
 
+  // Timing breakdown from this attempt's events, recorded just before its end event (shared
+  // computation, so the GUI's live figures for a running step match the recorded ones).
+  const recordTiming = () => {
+    try {
+      const timing = stepTiming(run.events(startedSeq), step.id, attempt, now());
+      if (timing) run.append({ type: "step_timing", stepId: step.id, attempt, timing });
+    } catch {
+      // diagnostics only: never fail a step over its timing
+    }
+  };
+
   const fail = (failKind: StepFailureKind, reason: string): StepOutcome => {
+    recordTiming();
     run.append({ type: "step_failed", stepId: step.id, attempt, kind: failKind, reason });
     return { kind: "failed", stepId: step.id, failKind, reason };
   };
@@ -324,15 +338,18 @@ async function runStepAttempt(
     if (ac.signal.aborted) throw new AbortedError("aborted");
     const chk = step.exitCheck ? await step.exitCheck(ctx, result) : { ok: true };
     if (!chk.ok) return fail("exit_check", chk.reason ?? "exit check failed");
+    recordTiming();
     run.append({ type: "step_completed", stepId: step.id, attempt, result, durationMs: Math.max(0, now() - t0) });
     return { kind: "completed", attention };
   } catch (e) {
     if (e instanceof QuotaExhaustedError) {
+      recordTiming();
       run.append({ type: "step_failed", stepId: step.id, attempt, kind: "quota", reason: e.message });
       return { kind: "quota", stepId: step.id, workerId: e.workerId, ...(e.resetsAt !== undefined ? { resetsAt: e.resetsAt } : {}) };
     }
     if (ac.signal.aborted || e instanceof AbortedError) {
       if (runSignal.aborted) {
+        recordTiming();
         run.append({ type: "step_failed", stepId: step.id, attempt, kind: "cancelled", reason: "run cancelled" });
         return { kind: "cancelled" };
       }

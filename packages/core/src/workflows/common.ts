@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { StepContext } from "../engine/types.js";
 import type { RunState } from "../state/reducer.js";
 import { runStructured } from "../engine/structured.js";
-import { SwapCheck } from "../schemas/outputs.js";
+import { ConsensusSwapCheck, SwapCheck } from "../schemas/outputs.js";
 import { buildScrubber, type Scrubber } from "../text/anonymize.js";
 
 /** Result of a completed step, or undefined. */
@@ -78,6 +78,32 @@ export async function runSwapPass(
     task: { cwd: o.cwd, mode: "read-only", stepDir: ctx.stepDir, inputsDir: path.join(ctx.stepDir, "inputs"), timeoutMs: o.timeoutMs, prompt },
   });
   return new Map(r.value.verdicts.map((v) => [v.index, v.side]));
+}
+
+/**
+ * Consensus swap pass (fresh session, sides swapped): per decision of the first pass, would the
+ * judge adopt it too, and which side is it based on. Returns index → { adopt, side }.
+ */
+export async function runConsensusSwapPass(
+  ctx: StepContext,
+  o: { judgeId: string; cwd: string; timeoutMs: number; fileList: string; decisions: { index: number; text: string }[] },
+): Promise<Map<number, { adopt: boolean; side: SideRating }>> {
+  const prompt = [
+    "You are the judge. Two anonymous engineers, A and B, independently wrote proposals for the same task and critiqued each other's proposal. Read these files with your read tool:",
+    o.fileList,
+    "",
+    "The repository in your working directory is the code they refer to (read-only). The order of A and B is random and carries no meaning.",
+    "Below are candidate decisions for the recommended plan. For each numbered decision: set adopt=true if you, judging from the files and the code, would make it part of the recommended plan, else false; and set side to the proposal it is based on (A, B, both, or neither). Letters A/B inside the decision texts are from an earlier, independent labelling and carry no meaning here.",
+    "",
+    ...o.decisions.map((d) => `${d.index}. ${d.text}`),
+  ].join("\n");
+  const r = await runStructured(ctx, {
+    workerId: o.judgeId,
+    schema: ConsensusSwapCheck,
+    name: "swap",
+    task: { cwd: o.cwd, mode: "read-only", stepDir: ctx.stepDir, inputsDir: path.join(ctx.stepDir, "inputs"), timeoutMs: o.timeoutMs, prompt },
+  });
+  return new Map(r.value.verdicts.map((v) => [v.index, { adopt: v.adopt, side: v.side }]));
 }
 
 /** Warning-only scan (never rewrites code): identity tokens in diffs handed to the judge. */

@@ -5,7 +5,7 @@ A local orchestrator that runs two coding agents from different model families o
 - **Opus** through Claude Code, on your Claude Pro subscription (no Anthropic API key).
 - **DeepSeek V4.1 Flash** (Baseten's "Fast" variant) through the Pi coding agent, on Baseten.
 
-The default judge is **GLM-5.3 Flash** (Baseten, via Pi), a third model family. The review workflow's default reviewer is **GPT-6.1 Sol** (OpenAI API, via Pi). Opus and DeepSeek use medium reasoning by default; the judge uses high, because GLM-5.3 Flash has no medium level.
+The duel's default judge is **GLM-5.3 Flash** (Baseten, via Pi), a third model family. The review workflow's default reviewer is **GPT-6.1 Sol** (OpenAI API, via Pi). **Consensus has its own lineup:** GPT-6.1 Sol and DeepSeek V4.1 Flash 1017 (the standard, non-Fast build on Baseten) write the proposals, and Opus judges (effort medium). Opus, DeepSeek and GPT use medium reasoning by default; the GLM judge uses high, because GLM-5.3 Flash has no medium level.
 
 It has three workflows:
 
@@ -85,13 +85,14 @@ Other options you may want:
 | `workers.opus` | `{ "kind": "claude", "model": "opus", "effort": "medium" }` | Claude worker |
 | `workers.deepseek` | `{ "kind": "pi", "provider": "baseten", "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast", "thinking": "medium" }` | Pi worker |
 | `workers.glm` | `{ "kind": "pi", "provider": "baseten", "model": "zai-org/GLM-5.3-Flash", "thinking": "high" }` | Pi worker used as judge (levels: low/high/max) |
-| `workers.gpt` | `{ "kind": "pi", "provider": "openai", "model": "gpt-6.1-sol", "thinking": "medium", "passEnv": ["OPENAI_API_KEY"] }` | Pi worker used as reviewer |
+| `workers.gpt` | `{ "kind": "pi", "provider": "openai", "model": "gpt-6.1-sol", "thinking": "medium", "passEnv": ["OPENAI_API_KEY"] }` | Pi worker: review reviewer, consensus contestant |
+| `workers.deepseek-std` | `{ "kind": "pi", "provider": "baseten", "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "thinking": "medium" }` | Pi worker: consensus contestant (standard build, half the Fast price) |
 | `workers.<id>.family` | inferred | model family (`anthropic`, `openai`, `deepseek`, ...); set it when it can't be inferred from the provider or model id |
-| `roles` | `{ "contestants": ["opus", "deepseek"], "judge": "glm", "implementer": "opus", "reviewer": "gpt" }` | who competes, who judges, who implements and reviews (reviewer and implementer must be different families) |
+| `roles` | `{ "contestants": ["opus", "deepseek"], "judge": "glm", "implementer": "opus", "reviewer": "gpt" }` | duel: who competes and judges; review: who implements and reviews (reviewer and implementer must be different families) |
 | `review` | `{ "maxRounds": 1, "maxFixIterations": 2, "maxFindings": 30 }` | rebuttal rounds; fix rounds after each edit; findings cap |
 | `review.testCommand` | unset | `{ "argv": [..., "{testFile}"], "failExitCodes": [1], "requireFileInOutput": true }`: runs one reviewer test. Exit 0 = refuted, a failure code = confirmed, anything else (or output that doesn't name the file) = error. Without it, reviewer tests aren't run. |
-| `consensus` | `{ "maxRounds": 1, "minRefs": 3 }` | revision rounds; required `path:line` refs per proposal |
-| `judge.swapOrderPass` | `true` | judge a second time with A/B swapped; keep only what both passes agree on (doubles judge calls) |
+| `consensus` | `{ "maxRounds": 1, "minRefs": 3, "contestants": ["gpt", "deepseek-std"], "judge": "opus" }` | revision rounds; required `path:line` refs per proposal; consensus lineup (instead of `roles`) |
+| `judge.swapOrderPass` | `true` | judge a second time with A/B swapped (doubles judge calls). Duel: keep only items both passes credit to the same side. Consensus: keep decisions the second pass also adopts; a different attribution only marks them "attribution unstable" |
 | `duel.applyWorker` | first contestant | whose session applies the approved items |
 | `retry` | `{ "transientMaxRetries": 2, "backoffMs": [5000, 30000], "rateLimitBackoffMs": [60000, 120000] }` | step retries after 5xx / network / provider 429 errors, once Pi's own retries are used up; a Retry-After in the error is honoured |
 | `quota` | `{ "warnUtilization": 0.8 }` | warn when the last known Claude 5-hour or 7-day usage is above this |
@@ -140,7 +141,7 @@ Things worth knowing:
 
 - **Runs:** status, workflow, repo, times; clean-up of old worktrees.
 - **New run:** pick the workflow, the repository and type the prompt, then start. The repository field is pre-filled with the `serve` repo (or the most recent run's), offers earlier runs' repos, and is checked as you type (git repo, branch, uncommitted changes, start warnings). The daemon drives the run, so closing the browser doesn't stop it; stopping the daemon pauses it until `fractory resume`.
-- **Live:** the phase strip and one pane per worker, streaming text and tool calls (collapsible; blocked calls marked).
+- **Live:** the phase strip and one pane per worker, streaming text and tool calls (collapsible; blocked calls marked). Each step shows a timing line: wall time, tool calls and rounds, time in tools vs generation, output (and, where reported, reasoning) tokens, tokens per second of generation. `fractory show` prints the same per step.
 - **Compare:** proposals and critiques side by side, or duel diffs side by side (Monaco).
 - **Verdict:** judge items with checkboxes, approve and resume, the final report. For a review run: the findings with their test results, answers and rebuttals, and apply/dismiss checkboxes for the remaining disagreements.
 
@@ -155,10 +156,10 @@ The daemon only listens on `127.0.0.1`. It needs a per-launch token on every req
 Automated tests never call a model. To check your setup end to end (one tiny call per worker; Claude uses `haiku`):
 
 ```sh
-npm run smoke                 # Claude, DeepSeek and the GLM-5.3 Flash judge
-npm run smoke -- --pi         # only DeepSeek
+npm run smoke                 # Claude, both DeepSeek builds and the GLM-5.3 Flash judge
+npm run smoke -- --pi         # only DeepSeek (Fast and 1017)
 npm run smoke -- --opus       # use Opus instead of haiku
-npm run smoke -- --gpt        # only the GPT-6.1 Sol reviewer (needs OPENAI_API_KEY)
+npm run smoke -- --gpt        # only GPT-6.1 Sol, reviewer and consensus contestant (needs OPENAI_API_KEY)
 ```
 
 ## Develop

@@ -1,4 +1,4 @@
-import type { ListedRun, ReviewerStats, RunEvent, RunState } from "@fractory/core";
+import { formatTiming, type ListedRun, type ReviewerStats, type RunEvent, type RunState } from "@fractory/core";
 
 const time = (iso: string) => iso.slice(11, 19);
 const who = (st: RunState, stepId: string) => {
@@ -109,7 +109,13 @@ export function formatShow(st: RunState): string {
     const s = st.steps[id]!;
     rows.push([id, s.status, String(s.attempt), s.workerId ?? "", s.resolvedModels.join(","), String(s.toolCalls), String(s.toolBlocked)]);
   }
-  out.push(table(rows).trimEnd(), "", "usage:");
+  out.push(table(rows).trimEnd());
+  const timed = st.stepOrder.filter((id) => st.steps[id]!.timing);
+  if (timed.length) {
+    out.push("", "timing (tool time vs generation; generation includes model latency):");
+    for (const id of timed) out.push(`  ${id}: ${formatTiming(st.steps[id]!.timing!)}`);
+  }
+  out.push("", "usage:");
   for (const [w, c] of Object.entries(st.costs)) {
     const tokens = `in ${c.tokens.input}, out ${c.tokens.output}, cache r/w ${c.tokens.cacheRead}/${c.tokens.cacheWrite}`;
     if (c.billing === "subscription") {

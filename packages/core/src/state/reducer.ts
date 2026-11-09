@@ -107,6 +107,11 @@ export function reduceInto(state: RunState | null, ev: RunEvent): RunState {
       st.failure = { kind: ev.kind, reason: ev.reason };
       break;
     }
+    case "step_timing": {
+      const st = s.steps[ev.stepId];
+      if (st && st.attempt === ev.attempt) st.timing = ev.timing;
+      break;
+    }
     case "step_abandoned": {
       const st = step(ev.stepId);
       st.status = "abandoned";

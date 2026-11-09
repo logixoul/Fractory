@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatTiming } from "@fractory/shared/timing";
   import type { Pane } from "../lib/panes.js";
 
   let { pane }: { pane: Pane } = $props();
@@ -18,8 +19,17 @@
         <code>{step.stepId}</code>
         {#if step.attempt > 1}<span class="muted">attempt {step.attempt}</span>{/if}
         <span class={`badge ${step.status}`}>{step.status}</span>
-        {#if step.detail}<span class="muted detail" title={step.detail}>{step.detail}</span>{/if}
+        {#if step.detail && !(step.status === "completed" && step.timing)}<span class="muted detail" title={step.detail}>{step.detail}</span>{/if}
       </div>
+      {#if step.timing}
+        {@const t = step.timing}
+        <div
+          class="timing muted"
+          title={`wall ${t.wallMs} ms = worker ${t.workerMs} ms (tools ${t.toolMs} ms + generation ${t.generationMs} ms) + orchestrator ${t.orchestratorMs} ms. Generation includes model latency between turns. Input ${t.inputTokens} tokens.${t.reasoningTokens === null ? " Reasoning tokens: not reported separately by this worker." : ""}${t.invocations.length > 1 ? `\n${t.invocations.map((v, i) => `invocation ${i + 1}: ${v.wallMs} ms, ${v.toolCalls} tool calls in ${v.toolRounds} rounds, ${v.outputTokens} out`).join("\n")}` : ""}`}
+        >
+          {formatTiming(t)}{step.status === "running" ? " (so far)" : ""}
+        </div>
+      {/if}
       {#each step.items as it, i (i)}
         {#if it.kind === "text"}
           <div class="text">{it.text}</div>
@@ -53,6 +63,7 @@
   .step { border-top: 1px solid var(--border); padding: 8px 0; }
   .head { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
   .detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; font-size: 12px; }
+  .timing { font-size: 12px; margin: 2px 0 4px; font-variant-numeric: tabular-nums; }
   .text { white-space: pre-wrap; word-break: break-word; margin: 4px 0; }
   .thinking { color: var(--muted); }
   .tool { margin: 4px 0; font-size: 12.5px; }

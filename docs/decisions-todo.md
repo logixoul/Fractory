@@ -330,3 +330,32 @@ Requested: launch a run from the web UI, with the prompt typed into a textarea (
 Requested: a stable GUI URL instead of a random port.
 
 - [ ] **`fractory serve` defaults to `127.0.0.1:4000`**; `--port 0` still means any free port. 4000 is also Phoenix's and Jekyll's default, so a clash is possible. A port in use is a clear user error (exit 1) with no fallback to another port, because a silent fallback would bring back the changing URL. The login link is still needed after every restart, because the token is per launch.
+
+## Consensus lineup, swap pass, judge inputs, route refs, step timing (2026-11-10)
+
+Requested: GPT-6.1 Sol + standard DeepSeek (1017) as consensus contestants with an Opus judge (effort medium); a consensus swap pass that checks the decision, not the attribution; revision summaries and critique targets in the judge inputs; route-style paths in refs; a per-step timing breakdown.
+
+**Lineup**
+- [ ] **The lineup lives in `consensus.contestants` / `consensus.judge`** (defaults `["gpt", "deepseek-std"]`, `"opus"`), not in `roles`, which duel (and review) keep using. No profiles. A config that sets `roles.contestants` no longer affects consensus runs.
+- [ ] **New worker `deepseek-std`**: `deepseek-ai/DeepSeek-V4.1-Flash-1017` on Baseten, `thinking: medium`. Price input $0.30, output $1.20, cache read $0.007 per 1M, from Pi 1.5.0's Baseten catalog (checked 2026-11-10; half the Fast price, consistent with Baseten's own catalog read on 2026-11-09). Baseten's `/v1/models` wasn't queried again (needs the API key). The smoke script's `--pi` now runs both DeepSeek builds; **`deepseek-std` hasn't had a real call yet.**
+- [ ] **No judge-family rule.** Opus judging GPT and DeepSeek is a third family by construction of the defaults, but nothing enforces it.
+- [ ] **Anonymizer patterns gained `GPT`, `OpenAI`, `ChatGPT`, `Codex`** (prose only, as before). "GPT" as a word in a proposal (e.g. "a GPT-style tokenizer") becomes `[agent]` too.
+- [ ] **Opus as judge uses Pro quota:** judge + swap pass (+ an evidence-repair turn if needed), each reading all proposals, critiques and revision summaries. The quota pause handles exhaustion as for any Claude step.
+
+**Swap pass (consensus only)**
+- [ ] **The second pass answers `{ adopt, side }` per first-pass decision** (new schema `ConsensusSwapCheck`, same `swap` output name). Not adopted (or missing) → dropped, listed under "Dropped by the swapped-order pass". Adopted with a side that maps to different contestants → kept with `attributionUnstable: true`, a note in decision.md, and one warning `attribution_unstable` per judge step. The duel keeps the attribution-based check.
+- [ ] **"neither" from the second pass is an attribution like any other**: an adopted decision it credits to neither side is kept, marked unstable unless the first pass also said "neither".
+
+**Judge inputs**
+- [ ] **`revisions-A.md` / `revisions-B.md`** per side: every revision round with "revised"/"no changes" and the change summary (scrubbed and leak-checked like the proposals). Written even when no rounds ran ("the proposal is the original draft").
+- [ ] **Critique labelling:** there is one critique round, always against the other side's original proposal, so the file list says "targeting B's ORIGINAL proposal (before any revision)", and each proposal line says which draft it is ("revised in round 1 of 1", "the original, unchanged through 1 revision round(s)"). The prompt adds that a criticised point may already be addressed. The swap pass gets the same list, with sides swapped.
+
+**Route-style refs**
+- [ ] **Path segments may contain balanced `[x]`, `[[x]]`, `[...x]`, `[p=matcher]` and `(x)` groups** (characters inside: word chars, `@ + - . =`; no `=` in parentheses). Unbalanced brackets never join a path, so `(src/a.ts:42)` and `[text](src/a.ts:42)` still give `src/a.ts:42`. Everything else is unchanged. One extractor (`findRefs` in shared) serves core validation, the footer warning and GUI links.
+- [ ] **In-app ref links percent-encode `( ) '`** in path segments, and evidence link texts escape `[ ] \`, so route paths can't end a markdown link early.
+
+**Step timing**
+- [ ] **`step_timing` event right before every attempt's end event** (completed, failed, quota, cancelled; not for approval gates), stored on the step as `timing`. Computed by one Node-free function in shared from the attempt's event timestamps; the GUI uses the same function live for running steps.
+- [ ] **Definitions** (approximate, from event arrival times): tool time = union of `tool_call`→`tool_result`/`tool_blocked` intervals; worker time = union of invocations (`start`→`done`/`error`); generation = worker − tool, so it includes model latency between turns and harness overhead; orchestrator = wall − worker (gates, snapshots, checks, spawn). A "round" = the tool calls of one model turn (Pi turns whose calls interleave with results would count as several).
+- [ ] **Reasoning tokens are `null` when no usage event reports them**; Claude counts thinking inside output tokens, so the Opus judge always shows output only. Tokens/s = output tokens / generation time.
+- [ ] **Shown as one line per step** in the Live panes (hover for the full breakdown and per-invocation figures, e.g. judge vs swap pass) and in `fractory show`. The live line for a running step updates when events arrive, not on a clock.

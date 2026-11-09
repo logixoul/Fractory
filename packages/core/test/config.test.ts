@@ -42,7 +42,12 @@ describe("loadConfig", () => {
     expect(config.judge.swapOrderPass).toBe(true);
     expect(config.retry).toEqual({ transientMaxRetries: 2, backoffMs: [5000, 30000], rateLimitBackoffMs: [60000, 120000] });
     expect(config.quota.warnUtilization).toBe(0.8);
-    expect(config.consensus).toEqual({ maxRounds: 1, minRefs: 3 });
+    // consensus has its own lineup: GPT-6.1 Sol and the standard DeepSeek 1017 build, judged by Opus
+    expect(config.consensus).toEqual({ maxRounds: 1, minRefs: 3, contestants: ["gpt", "deepseek-std"], judge: "opus" });
+    expect(config.workers["deepseek-std"]).toMatchObject({ kind: "pi", provider: "baseten", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017", thinking: "medium" });
+    expect(config.prices["baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017"]).toMatchObject({ input: 0.3, output: 1.2, cacheRead: 0.007 });
+    expect(config.workers.opus).toMatchObject({ kind: "claude", model: "opus", effort: "medium" });
+    expect(config.anonymize.patterns).toEqual(expect.arrayContaining(["\\bGPT\\b", "\\bOpenAI\\b", "\\bChatGPT\\b", "\\bCodex\\b"]));
     expect(config.duel.maxFixIterations).toBe(2);
   });
 
@@ -56,7 +61,7 @@ describe("loadConfig", () => {
     expect(config.quota.warnUtilization).toBe(0.5);
     expect(config.workers.deepseek).toMatchObject({ kind: "pi", thinking: "off", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast" });
     expect(config.workers.opus).toMatchObject({ kind: "claude" });
-    expect(config.consensus).toEqual({ maxRounds: 2, minRefs: 3 });
+    expect(config.consensus).toMatchObject({ maxRounds: 2, minRefs: 3 });
     expect(config.checks).toEqual([{ name: "test", argv: ["npm", "test"], timeoutMs: 600_000, artifacts: [] }]);
     expect(config.contextFiles).toEqual(["X.md"]);
   });

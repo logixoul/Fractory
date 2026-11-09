@@ -106,7 +106,7 @@ describe("2. transient errors: automatic retry with backoff; --retry-failed", ()
     const store = new RunStore(data, new Redactor());
     const prompt = path.join(tmpDir(), "p.md");
     fs.writeFileSync(prompt, "Add div.\n");
-    const config = testConfig({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } }, retry: { backoffMs: [1] } });
+    const config = testConfig({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } }, consensus: { contestants: ["opus", "deepseek"], judge: "glm" }, retry: { backoffMs: [1] } });
     const run = await createRun(store, { workflow: "duel", repo, promptFile: prompt, config });
     let n = 0;
     const writeDiv: FakeScript = { actions: [{ writeFile: { path: "math.js", content: "export const div = (a, b) => a / b;\n" } }], finalText: "ok" };
@@ -180,7 +180,7 @@ describe("9. fractory clean / gc", () => {
     const store = new RunStore(data, new Redactor());
     const prompt = path.join(tmpDir(), "p.md");
     fs.writeFileSync(prompt, "Add div.\n");
-    const config = testConfig({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } } });
+    const config = testConfig({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } }, consensus: { contestants: ["opus", "deepseek"], judge: "glm" } });
     const run = await createRun(store, { workflow: "duel", repo, promptFile: prompt, config });
     const writeDiv: FakeScript = { actions: [{ writeFile: { path: "math.js", content: "export const div = (a, b) => a / b;\n" } }], finalText: "ok" };
     const workers = {
@@ -221,15 +221,24 @@ describe("9. fractory clean / gc", () => {
   });
 });
 
+/** A consensus run (opus vs deepseek, judged by fake glm) with the swapped-order pass on. */
+async function swapRun() {
+  const repo = initRepo({ "math.js": "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n" });
+  const data = dataDir();
+  const store = new RunStore(data, new Redactor());
+  const prompt = path.join(tmpDir(), "p.md");
+  fs.writeFileSync(prompt, "Add div.\n");
+  const config = testConfig({
+    workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } },
+    consensus: { contestants: ["opus", "deepseek"], judge: "glm" },
+    judge: { swapOrderPass: true },
+  });
+  return { data, run: await createRun(store, { workflow: "consensus", repo, promptFile: prompt, config }) };
+}
+
 describe("3. consensus judge.swapOrderPass", () => {
-  it("keeps decisions both passes attribute alike; the rest are listed as dropped", async () => {
-    const repo = initRepo({ "math.js": "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n" });
-    const data = dataDir();
-    const store = new RunStore(data, new Redactor());
-    const prompt = path.join(tmpDir(), "p.md");
-    fs.writeFileSync(prompt, "Add div.\n");
-    const config = testConfig({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } }, judge: { swapOrderPass: true } });
-    const run = await createRun(store, { workflow: "consensus", repo, promptFile: prompt, config });
+  it("checks the decision, not attribution: adopted decisions survive any attribution flip (marked attributionUnstable); unadopted ones are dropped", async () => {
+    const { data, run } = await swapRun();
     const contestant = (id: string) =>
       new FakeWorker(id, (t) =>
         t.outFile?.endsWith("revise.json")
@@ -239,24 +248,96 @@ describe("3. consensus judge.swapOrderPass", () => {
     const verdict = {
       summary: "s",
       decisions: [
-        { topic: "keep", decision: "d1", rationale: "r", basedOn: "A", evidence: ["math.js:1"] },
-        { topic: "both", decision: "d2", rationale: "r", basedOn: "both", evidence: ["math.js:2"] },
-        { topic: "flip", decision: "d3", rationale: "r", basedOn: "B", evidence: ["math.js:3"] },
+        { topic: "stable", decision: "d1", rationale: "r", basedOn: "A", evidence: ["math.js:1"] },
+        // a decision both proposals contain: the swapped pass credits only one side, still adopted
+        { topic: "shared", decision: "d2", rationale: "r", basedOn: "both", evidence: ["math.js:2"] },
+        { topic: "flipped", decision: "d3", rationale: "r", basedOn: "B", evidence: ["math.js:3"] },
+        { topic: "rejected", decision: "d4", rationale: "r", basedOn: "A", evidence: ["math.js:1"] },
       ],
       unresolved: [],
     };
-    // swapped pass: A↔B exchanged. "keep" A→B agrees, "both" agrees, "flip" B→B disagrees.
-    const glm = new FakeWorker("glm", (t) =>
-      t.outFile?.endsWith("swap.json")
-        ? { structured: { verdicts: [{ index: 1, side: "B" }, { index: 2, side: "both" }, { index: 3, side: "B" }] } }
-        : { structured: verdict },
-    );
+    // swapped pass (A and B exchanged): "stable" A→B maps to the same contestant; "shared" both→A
+    // and "flipped" B→B map differently but are adopted; "rejected" is not adopted.
+    const swapVerdicts = [
+      { index: 1, adopt: true, side: "B" },
+      { index: 2, adopt: true, side: "A" },
+      { index: 3, adopt: true, side: "B" },
+      { index: 4, adopt: false, side: "B" },
+    ];
+    const glm = new FakeWorker("glm", (t) => (t.outFile?.endsWith("swap.json") ? { structured: { verdicts: swapVerdicts } } : { structured: verdict }));
     const st = await driveRun(run, { dataDir: data, workers: { opus: contestant("opus"), deepseek: contestant("deepseek"), glm } });
+    expect(st.failure).toBeUndefined();
     expect(st.status).toBe("completed");
     const j = JSON.parse(fs.readFileSync((st.steps.judge!.result as { decisionJson: string }).decisionJson, "utf8"));
-    expect(j.verdict.decisions.map((d: { topic: string }) => d.topic)).toEqual(["keep", "both"]);
-    expect(j.droppedBySwapPass.map((d: { topic: string }) => d.topic)).toEqual(["flip"]);
-    expect(fs.readFileSync((st.steps.judge!.result as { decisionMd: string }).decisionMd, "utf8")).toContain("Dropped by the swapped-order pass");
+    expect(j.verdict.decisions.map((d: { topic: string; attributionUnstable?: boolean }) => [d.topic, d.attributionUnstable ?? false])).toEqual([
+      ["stable", false],
+      ["shared", true],
+      ["flipped", true],
+    ]);
+    expect(j.droppedBySwapPass.map((d: { topic: string }) => d.topic)).toEqual(["rejected"]);
+    expect(st.warnings.map((w) => w.code)).toContain("attribution_unstable");
+    const md = fs.readFileSync((st.steps.judge!.result as { decisionMd: string }).decisionMd, "utf8");
+    expect(md).toContain("Dropped by the swapped-order pass");
+    expect(md.match(/attribution unstable/g)).toHaveLength(2);
+  });
+
+  it("a decision both proposals contain survives every attribution the swapped pass gives it", async () => {
+    for (const side of ["A", "B", "both", "neither"] as const) {
+      const { data, run } = await swapRun();
+      const contestant = (id: string) =>
+        new FakeWorker(id, (t) =>
+          t.outFile?.endsWith("revise.json") ? { structured: { noChanges: true, proposal: "", changeSummary: "" } } : { finalText: "put div in math.js math.js:1 math.js:2 math.js:3" },
+        );
+      const verdict = { summary: "s", decisions: [{ topic: "div", decision: "put div in math.js", rationale: "r", basedOn: "both", evidence: ["math.js:3"] }], unresolved: [] };
+      const glm = new FakeWorker("glm", (t) => (t.outFile?.endsWith("swap.json") ? { structured: { verdicts: [{ index: 1, adopt: true, side }] } } : { structured: verdict }));
+      const st = await driveRun(run, { dataDir: data, workers: { opus: contestant("opus"), deepseek: contestant("deepseek"), glm } });
+      expect(st.status).toBe("completed");
+      const j = JSON.parse(fs.readFileSync((st.steps.judge!.result as { decisionJson: string }).decisionJson, "utf8"));
+      const d = j.verdict.decisions as { topic: string; attributionUnstable?: boolean }[];
+      expect(d.map((x) => x.topic)).toEqual(["div"]);
+      expect(d[0]!.attributionUnstable ?? false).toBe(side !== "both");
+      expect(j.droppedBySwapPass).toEqual([]);
+    }
+  });
+
+  it("judge inputs: revision summaries per side, and critiques labelled with the draft they target", async () => {
+    const { data, run } = await swapRun();
+    const contestant = (id: string, revise?: string) =>
+      new FakeWorker(id, (t) =>
+        t.outFile?.endsWith("revise.json")
+          ? {
+              structured: revise
+                ? { noChanges: false, proposal: `${id} revised math.js:1 math.js:2 math.js:3`, changeSummary: revise }
+                : { noChanges: true, proposal: "", changeSummary: "kept as is" },
+            }
+          : { finalText: `${id} plan math.js:1 math.js:2 math.js:3` },
+      );
+    const verdict = { summary: "s", decisions: [{ topic: "t", decision: "d", rationale: "r", basedOn: "A", evidence: ["math.js:1"] }], unresolved: [] };
+    const prompts: string[] = [];
+    const glm = new FakeWorker("glm", (t) => {
+      prompts.push(t.prompt);
+      return t.outFile?.endsWith("swap.json") ? { structured: { verdicts: [{ index: 1, adopt: true, side: "B" }] } } : { structured: verdict };
+    });
+    const st = await driveRun(run, { dataDir: data, workers: { opus: contestant("opus"), deepseek: contestant("deepseek", "added a zero guard"), glm } });
+    expect(st.status).toBe("completed");
+    const sides = (st.steps.judge!.result as { sides: Record<"A" | "B", { workerId: string }> }).sides;
+    const ds = sides.A.workerId === "deepseek" ? "A" : "B";
+    const op = ds === "A" ? "B" : "A";
+    const inputs = path.join(run.dir, "steps", "judge", "inputs");
+    expect(fs.readFileSync(path.join(inputs, `revisions-${ds}.md`), "utf8")).toMatch(/## Round 1: revised\s+added a zero guard/);
+    expect(fs.readFileSync(path.join(inputs, `revisions-${op}.md`), "utf8")).toMatch(/## Round 1: no changes\s+kept as is/);
+    // judge + swap pass; in the swap pass A and B are exchanged
+    expect(prompts).toHaveLength(2);
+    const [first, swap] = prompts as [string, string];
+    expect(first).toContain(`proposal ${ds} (final version: revised in round 1 of 1)`);
+    expect(first).toContain(`proposal ${op} (final version: the original, unchanged through 1 revision round(s))`);
+    expect(swap).toContain(`proposal ${op} (final version: revised in round 1 of 1)`);
+    for (const p of prompts) {
+      expect(p).toContain("A's critique of B, targeting B's ORIGINAL proposal (before any revision)");
+      expect(p).toContain("B's critique of A, targeting A's ORIGINAL proposal (before any revision)");
+      expect(p).toMatch(/revisions-A\.md/);
+    }
+    expect(fs.readFileSync(path.join(inputs, "swap", `revisions-${op}.md`), "utf8")).toContain("added a zero guard");
   });
 
   it("no surviving decision: no_robust_preferences, an empty verdict, and the run completes", async () => {
@@ -265,13 +346,13 @@ describe("3. consensus judge.swapOrderPass", () => {
     const store = new RunStore(data, new Redactor());
     const prompt = path.join(tmpDir(), "p.md");
     fs.writeFileSync(prompt, "Add div.\n");
-    const config = testConfig({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } }, judge: { swapOrderPass: true } });
+    const config = testConfig({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } }, consensus: { contestants: ["opus", "deepseek"], judge: "glm" }, judge: { swapOrderPass: true } });
     const run = await createRun(store, { workflow: "consensus", repo, promptFile: prompt, config });
     const contestant = (id: string) =>
       new FakeWorker(id, (t) => (t.outFile?.endsWith("revise.json") ? { structured: { noChanges: true, proposal: "", changeSummary: "" } } : { finalText: `${id} math.js:1 math.js:2 math.js:3` }));
     const verdict = { summary: "s", decisions: [{ topic: "t", decision: "d", rationale: "r", basedOn: "A", evidence: ["math.js:1"] }], unresolved: [] };
-    // A in pass 1; "A" again after swapping means the other contestant: disagreement.
-    const glm = new FakeWorker("glm", (t) => (t.outFile?.endsWith("swap.json") ? { structured: { verdicts: [{ index: 1, side: "A" }] } } : { structured: verdict }));
+    // the swapped pass does not adopt the only decision
+    const glm = new FakeWorker("glm", (t) => (t.outFile?.endsWith("swap.json") ? { structured: { verdicts: [{ index: 1, adopt: false, side: "B" }] } } : { structured: verdict }));
     const st = await driveRun(run, { dataDir: data, workers: { opus: contestant("opus"), deepseek: contestant("deepseek"), glm } });
     expect(st.failure).toBeUndefined();
     expect(st.status).toBe("completed");
@@ -280,5 +361,24 @@ describe("3. consensus judge.swapOrderPass", () => {
     const j = JSON.parse(fs.readFileSync((st.steps.judge!.result as { decisionJson: string }).decisionJson, "utf8"));
     expect(j.verdict.decisions).toEqual([]);
     expect(fs.readFileSync((st.steps.judge!.result as { decisionMd: string }).decisionMd, "utf8")).toContain("No robust preferences");
+  });
+});
+
+describe("consensus lineup", () => {
+  it("consensus runs use config.consensus (gpt + deepseek-std, judged by opus); duel keeps config.roles", async () => {
+    const store = new RunStore(dataDir(), new Redactor());
+    const prompt = path.join(tmpDir(), "p.md");
+    fs.writeFileSync(prompt, "x\n");
+    const consensus = (await createRun(store, { workflow: "consensus", repo: initRepo(), promptFile: prompt, config: testConfig() })).state();
+    expect(consensus.roles).toMatchObject({ contestants: ["gpt", "deepseek-std"], judge: "opus" });
+    expect(Object.values(consensus.labels).sort()).toEqual(["deepseek-std", "gpt"]);
+    const duel = (await createRun(store, { workflow: "duel", repo: initRepo(), promptFile: prompt, config: testConfig() })).state();
+    expect(duel.roles).toMatchObject({ contestants: ["opus", "deepseek"], judge: "glm" });
+    expect(Object.values(duel.labels).sort()).toEqual(["deepseek", "opus"]);
+  });
+
+  it("rejects an unknown or duplicate consensus worker", () => {
+    expect(() => testConfig({ consensus: { judge: "nope" } })).toThrow(/consensus\.judge.*unknown worker 'nope'|unknown worker 'nope'/s);
+    expect(() => testConfig({ consensus: { contestants: ["gpt", "gpt"] } })).toThrow(/two different workers/);
   });
 });

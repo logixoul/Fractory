@@ -61,7 +61,7 @@ async function setup(cfgOver: unknown = {}, workers?: (d: { opus?: Over; deepsee
   const store = new RunStore(data, new Redactor());
   const prompt = path.join(tmpDir(), "prompt.md");
   fs.writeFileSync(prompt, "Add a division function. Mention Claude here on purpose.\n");
-  const config = testConfig({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } }, consensus: { minRefs: 3 }, ...(cfgOver as object) });
+  const config = testConfig({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } }, consensus: { minRefs: 3, contestants: ["opus", "deepseek"], judge: "glm" }, ...(cfgOver as object) });
   const run = await createRun(store, { workflow: "consensus", repo, promptFile: prompt, config });
   return { repo, data, store, run };
 }
@@ -99,7 +99,7 @@ describe("consensus workflow", () => {
     const judgeCall = glm.calls.find((c) => /You are the judge/.test(c.prompt))!;
     expect(deepseek.calls.some((c) => /You are the judge/.test(c.prompt))).toBe(false);
     const inputs = fs.readdirSync(judgeCall.inputsDir!).sort();
-    expect(inputs).toEqual(["critique-by-A.md", "critique-by-B.md", "proposal-A.md", "proposal-B.md", "task.md"]);
+    expect(inputs).toEqual(["critique-by-A.md", "critique-by-B.md", "proposal-A.md", "proposal-B.md", "revisions-A.md", "revisions-B.md", "task.md"]);
     const all = inputs.map((f) => fs.readFileSync(path.join(judgeCall.inputsDir!, f), "utf8")).join("\n");
     // prose is scrubbed; the user's own task text is exempt (it says "Mention Claude here on purpose")
     const prose = inputs.filter((f) => f !== "task.md").map((f) => fs.readFileSync(path.join(judgeCall.inputsDir!, f), "utf8")).join(" ");
@@ -118,8 +118,40 @@ describe("consensus workflow", () => {
     expect(g(repo, "status", "--porcelain", "--ignored")).toBe(statusBefore);
   });
 
+  it("records a step_timing breakdown for every step attempt (tool rounds, tool time, tokens)", async () => {
+    const { data, run } = await setup();
+    const glm = contestant("glm", {
+      judge: () => ({
+        actions: [
+          { emit: { type: "tool_call", id: "r1", name: "read", input: { path: "math.js" } } },
+          { delayMs: 120 },
+          { emit: { type: "tool_result", id: "r1", isError: false, output: "ok" } },
+          { delayMs: 40 },
+          { emit: { type: "usage", provider: "fake", model: "glm", tokens: { input: 10, output: 321, cacheRead: 0, cacheWrite: 0, reasoning: 99 } } },
+        ],
+        structured: verdict,
+      }),
+    });
+    const st = await driveRun(run, { dataDir: data, workers: { glm, opus: contestant("opus"), deepseek: contestant("deepseek", {}, { reviseNoChanges: true }) } });
+    expect(st.status).toBe("completed");
+    const timings = run.events().filter((e) => e.type === "step_timing");
+    const worked = Object.values(st.steps).filter((s) => s.id !== "setup");
+    for (const s of worked) {
+      expect(s.timing, s.id).toBeDefined();
+      expect(timings.some((e) => e.type === "step_timing" && e.stepId === s.id && e.attempt === s.attempt)).toBe(true);
+    }
+    // every step_timing comes right before its step's end event
+    const evs = run.events();
+    for (const [i, e] of evs.entries()) if (e.type === "step_timing") expect(["step_completed", "step_failed"]).toContain(evs[i + 1]!.type);
+    const j = st.steps.judge!.timing!;
+    expect(j).toMatchObject({ toolCalls: 1, toolRounds: 1, outputTokens: 321, reasoningTokens: 99 });
+    expect(j.toolMs).toBeGreaterThanOrEqual(100);
+    expect(j.wallMs).toBeGreaterThanOrEqual(j.workerMs);
+    expect(j.workerMs).toBeGreaterThanOrEqual(j.toolMs);
+  });
+
   it("stops revising early when both report noChanges", async () => {
-    const { data, run } = await setup({ consensus: { maxRounds: 3, minRefs: 3 } });
+    const { data, run } = await setup({ consensus: { maxRounds: 3, minRefs: 3, contestants: ["opus", "deepseek"], judge: "glm" } });
     const st = await driveRun(run, {
       dataDir: data,
       workers: { glm: contestant("glm"), opus: contestant("opus", {}, { reviseNoChanges: true }), deepseek: contestant("deepseek", {}, { reviseNoChanges: true }) },

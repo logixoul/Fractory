@@ -105,6 +105,28 @@ export const SwapCheck = z
   .strict();
 export type SwapCheck = z.infer<typeof SwapCheck>;
 
+/**
+ * Consensus swap pass: the judge, with A and B swapped, says per first-pass decision whether it
+ * would also adopt it, and which side it is based on. Adoption decides survival; a differing
+ * attribution only marks the decision `attributionUnstable` (the duel keeps attribution checks).
+ */
+export const ConsensusSwapCheck = z
+  .object({
+    verdicts: z
+      .array(
+        z
+          .object({
+            index: z.number().int().positive(),
+            adopt: z.boolean().describe("true if you would make this decision part of the recommended plan yourself"),
+            side: z.enum(["A", "B", "both", "neither"]).describe("which proposal the decision is based on"),
+          })
+          .strict(),
+      )
+      .describe("one entry per numbered decision"),
+  })
+  .strict();
+export type ConsensusSwapCheck = z.infer<typeof ConsensusSwapCheck>;
+
 // ---- review workflow -------------------------------------------------------------------
 
 export const Severity = z.enum(["bug", "risk", "design", "nit"]);
