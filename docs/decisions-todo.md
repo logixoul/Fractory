@@ -4,7 +4,7 @@ Choices made while building fractory that you may want to confirm or change. Eac
 
 Binding requirements you already set (docs/interfaces.md §8) are not repeated here. This file lists only the calls made on top of them.
 
-**Status:** M0–M5 reviewed 2026-11-09. Everything there is confirmed except 11 items you changed. Those are marked *(changed in review)* and describe the new behaviour; all are implemented and tested. M6 is open for review.
+**Status:** M0–M5 and M6 reviewed 2026-11-09. Everything there is confirmed except the items you changed, which are marked *(changed in review)* and describe the new behaviour; all are implemented and tested. Open for review: the implementation choices at the end of M6.
 
 ---
 
@@ -145,58 +145,61 @@ API, all under `/api` and all requiring the token:
 - [x] **`fractory serve` options** (`--port`, `--no-open`, shell-free browser launch).
 - [x] **The daemon serves the built GUI from `packages/web/dist`.**
 
-## M6: GUI (and how the review changes were implemented)
+## M6: GUI (and how the M0–M5 review changes were implemented)
 
 GUI:
-- [ ] **Svelte 5 SPA with hash routing:** `#/` runs list; `#/run/<id>/live|compare|verdict`. A fragment survives the `/auth` → `/` redirect, so a login link can deep-link into a run.
-- [ ] **All state comes from the daemon.**
-  - The live view replays the run's event log over SSE from the start, and reconnects with `Last-Event-ID`.
-  - It refetches `state` at most every 300 ms after events.
-  - The runs list polls every 3 s, the header every 10 s. A page refresh loses nothing.
-- [ ] **Live view** has one pane per contestant, plus "judge" and "orchestrator" panes. Check steps go to their contestant's pane. Text deltas are merged. Tool calls are collapsible and paired with their results; blocked calls are marked red; transient retries appear inline.
-- [ ] **The phase indicator** is derived only from step states:
-  - Consensus: setup · propose · critique · revise · judge.
-  - Duel: setup · implement · check/fix · judge · approve · apply · recheck · report.
-- [ ] **Markdown rendering:** marked → DOMPurify, with `img`, `style`, `form` and `input` forbidden, and links forced to `noopener` + new tab.
-  - `path:line` refs, including inside code spans, become `vscode://file/<repo>/<path>:<line>` links.
-  - They point to **your main repo's** files, not the worktrees.
-- [ ] **Compare view:**
-  - Consensus: proposals, critiques and each revision round side by side.
-  - Duel: Monaco side-by-side diff per changed file, in three modes (A vs B, base vs A, base vs B). File contents come from `git show <commit>:<path>` through a new `blob` endpoint, which takes repo-relative paths only.
-- [ ] **Monaco is loaded lazily**, only in the duel compare view (the editor chunk is about 2.7 MB).
-  - Only the editor worker is used; language services aren't loaded, and syntax colouring comes from Monaco's basic tokenizers.
-  - **Verified under the daemon's CSP in headless Chrome:** the diff renders, the worker starts as a same-origin script, and there are no CSP violations or console errors. So `worker-src` was **tightened to `'self'`**; `blob:` isn't needed.
-- [ ] **Verdict view:**
-  - Consensus: shows `decision.md`.
-  - Duel: shows the judge items with checkboxes, "Approve N item(s) and resume" or "Approve only", the approved state, and `report.md` when done.
-- [ ] **Run controls:**
-  - Resume / Continue (needs_attention) / force resume (quota).
-  - Cancel / Abort.
-  - Retry failed step.
-  - Remove worktrees.
-  - Warnings and forfeits are shown as notes.
-- [ ] **Header widget:**
-  - Claude quota windows from the last rate-limit events.
-  - Per-worker token totals across runs: metered workers show their computed cost; subscription workers show "API-equivalent $…".
-- [ ] **The GUI duplicates two small pieces of core** (the `path:line` regex and the state types), because core is Node-only. The two regexes must be kept in sync.
-- [ ] **Dependencies:**
-  - Monaco bundles DOMPurify ≤3.4.16, which has critical XSS advisories. A root `overrides` forces 3.4.17 everywhere; `npm audit` no longer reports it.
-  - Two **low** advisories remain in `deepmerge` (via the Svelte Vite plugin, build-time only).
-- [ ] **Unit tests cover the GUI's pure logic** (panes, phases, refs → links, token stripping); there are no component tests. The screens were checked by hand in headless Chrome against a fake duel run.
+- [x] **Svelte 5 SPA with hash routing.** A fragment survives the `/auth` → `/` redirect.
+- [x] **All state comes from the daemon** (SSE replay and reconnect; state refetched ≤ every 300 ms; runs list every 3 s, header every 10 s).
+- [x] **Live view panes** (one per contestant, plus judge and orchestrator).
+- [x] **The phase indicator** is derived only from step states.
+- [x] **Opening `path:line` refs** *(changed in review)*:
+  - A ref now opens an **in-app, read-only Monaco view** of the file at **the commit the ref was made against**, scrolled to the line or range and highlighting it. The file comes through the blob endpoint.
+  - **"Open in VS Code"** is a secondary action in that view, labelled with what it opens:
+    - "Open in VS Code: opus (a1b2) worktree" while the worktree exists, with a note if the worktree has moved on since that commit;
+    - otherwise "Open in VS Code: main repository", with a note that your repository's current file may differ.
+  - Markdown is still marked → DOMPurify, with `img`, `style`, `form` and `input` forbidden.
+- [x] **Compare view** (consensus documents side by side; duel Monaco diffs in three modes).
+- [x] **Monaco is loaded lazily**, only for the duel compare view and the file view. It was verified under the CSP (`worker-src 'self'`).
+- [x] **Verdict view.**
+- [x] **Run controls.**
+- [x] **Header widget.**
+- [x] **No duplicated core code** *(changed in review)*:
+  - The `path:line` extractor and the state/event types now live in a Node-free **`packages/shared`**, imported by core and the GUI. The GUI's copies are gone.
+  - Core keeps re-export shims (`schemas/run-events.ts`, `schemas/worker-events.ts`, `state/reducer.ts` re-exports the state types), so its public API is unchanged.
+- [x] **Dependencies:** the DOMPurify override stays. Only the two low `deepmerge` advisories remain (build-time); Playwright added none.
+- [x] **GUI tests** *(changed in review)*: in addition to the unit tests, there's **one Playwright smoke test** against a fake duel run (`npm run e2e`).
+  - Path: runs list → open run → compare view renders the Monaco diff → open a `path:line` ref in the file view (line highlighted, labelled VS Code link) → approve one item → the state updates live to `completed`.
+  - It fails on any console error. It runs in CI together with `npm audit` once M7 adds CI.
 
-Review changes, implementation choices:
-- [ ] **What counts as transient:** HTTP 5xx and "overloaded", network errors, and for Pi/Together any 429 or "rate limit". "Max 2 attempts" was read as **2 retries** (3 tries in total). The retry counter is per step and resets on `--retry-failed`.
-- [ ] **`judge.swapOrderPass` is a verification pass, not a second full verdict.**
-  - The judge (fresh session) gets the same inputs with A and B swapped, plus the numbered points from pass 1. It rates each point A / B / both / neither.
-  - A point is kept only if both passes attribute it to the same contestant(s). Dropped points are listed in `decision.json`/`verdict.json`, `decision.md` and the report.
-  - If no point survives, the judge step fails (`exit_check`).
-  - Swap-pass inputs are written before the gate's `inputs/` baseline (§8.19).
-  - *Alternative:* two independent full verdicts matched by topic. That needs fuzzy matching of free text, which isn't machine-checkable.
-- [ ] **Both-forfeit is recorded as a failing `outcome` step**, so the failure is a normal, logged step result.
-- [ ] **`clean`:**
-  - It removes all of a run's worktree directories (contestants and judge).
-  - Leftover non-git directories are removed only after the guard's path check.
-  - It records `worktrees_cleaned` in the run log.
-  - **`gc` uses the run's last update time.**
-- [ ] **Login codes live only in daemon memory** (they don't survive a restart). Pressing Enter in the `serve` terminal mints a new one and opens it if `--open` is in effect.
-- [ ] **The dirty-repo check** counts tracked changes and untracked files (not ignored files) at run creation only.
+Review changes (M0–M5), implementation choices:
+- [x] **What counts as transient** (5xx/overloaded, network, Pi/Together 429). "Max 2 attempts" = 2 retries; the per-step counter resets on `--retry-failed`.
+- [x] **`judge.swapOrderPass` is a verification pass** over the first pass's numbered points (fresh session, A/B swapped). A point is kept only if both passes attribute it to the same contestant(s).
+- [x] **When no point survives the swap pass** *(changed in review)*:
+  - This is **not a failure**. The run records a `no_robust_preferences` warning and sets `noRobustPreferences` on the judge result, then continues with an empty verdict.
+  - Consensus: `decision.md` says "No robust preferences" and the run completes. The exit check accepts an empty decision list only when that flag is set.
+  - Duel: the run goes to the approval gate with nothing to approve; resuming skips apply and writes the report.
+- [x] **Both-forfeit is a failing `outcome` step.**
+- [x] **`clean` / `gc`.**
+- [x] **Login codes live in daemon memory**; Enter in the `serve` terminal mints a new one.
+- [x] **The dirty-repo check** runs at run creation only (tracked changes and untracked files).
+
+M6 review changes, implementation choices (open):
+- [ ] **Which commit a document's refs point to:**
+  - Consensus proposals, critiques and revisions, and `decision.md`: the **base commit**. Consensus worktrees never move off it.
+  - Duel judge items: **the better side's head at judging**. This is recorded as `heads` in the judge result, because the branch may move on later (apply, fixes).
+  - Duel `report.md`: the base commit, since its refs mix both sides.
+- [ ] **Which worktree "Open in VS Code" uses:**
+  - the author's worktree for proposals and critiques;
+  - the better side's worktree for duel items;
+  - the judge's worktree for `decision.md` and `report.md`.
+
+  It's marked "may differ" when that worktree has newer commits than the one shown. After `fractory clean`, the main repository is used, with a note.
+- [ ] **The blob endpoint serves only commits recorded in the run:** `rev=base`, a contestant label (its branch), or a 40-hex sha that appears in the run state (checkpoints, step heads, judge heads). Arbitrary refs such as `HEAD~1` and unknown shas are refused. It now works for consensus runs too.
+- [ ] **Refs that point outside the repository** (an absolute path under no known root) are shown greyed and aren't clickable.
+- [ ] **What's in `packages/shared`:**
+  - It holds the zod event schemas, the state types plus `TERMINAL_STATUSES`, and the refs extractor.
+  - The GUI imports the `@fractory/shared/refs` subpath at runtime and the types type-only, so zod isn't bundled into the GUI.
+  - `npm run typecheck` and `npm run build` build shared first; tests and the GUI compile it from source.
+- [ ] **Playwright uses the locally installed Chrome** (`channel: "chrome"`, overridable with `FRACTORY_E2E_CHANNEL`), so there's no browser download; GitHub-hosted runners have Chrome. It runs against the built `dist/`, so `npm run e2e` builds first. In CI, `npm audit` should use `--audit-level=moderate`, given the two low build-time findings.
+- [ ] **Fixed an M6 bug found by the smoke test:** `path:line` refs in rendered markdown were never actually turned into links, because the linking ran before `{@html}` had written the markup. It now runs after `tick()`, and the smoke test checks it.
+- [ ] **Fixed a regression found while moving the extractor:** an editing step had collapsed `[\\/]` to `[\/]` in the regex, so Windows absolute paths in refs no longer matched. The source was rewritten, and the unit tests cover both separators.

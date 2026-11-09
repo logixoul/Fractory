@@ -11,6 +11,7 @@ Local multi-model orchestrator: Opus (Claude Code, Pro subscription) and DeepSee
 6. **Machine-checkable exit conditions** for every phase (file exists, schema validates, git tree clean, checks pass). Never "the model said it's done".
 
 ## Non-negotiables
+- `packages/shared` (Node-free) holds the event schemas, run-state types and the `path:line` extractor, imported by core and web. Never duplicate them elsewhere.
 - Never build shell command strings. Spawn with argv arrays (`cross-spawn`). Use `path` everywhere.
 - Kill whole process trees (`tree-kill`) on cancel/timeout.
 - Claude child env: delete `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`. Never use `claude --bare` (it breaks the subscription login). Assert `apiKeySource === "none"`.

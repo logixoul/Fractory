@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { z } from "zod";
 import { withGates, type GateSpec } from "../engine/gated.js";
 import { StepFailure } from "../engine/errors.js";
 import { runStructured } from "../engine/structured.js";
@@ -56,6 +57,8 @@ export interface JudgeResult {
   sides: Record<"A" | "B", { label: string; workerId: string }>;
   scrubReplacements: number;
   invalidEvidence: string[];
+  /** No decision survived the swapped-order pass: the verdict has no decisions. */
+  noRobustPreferences?: boolean;
 }
 
 export function consensusWorkflow(env: ConsensusEnv): WorkflowDef {
@@ -375,17 +378,26 @@ function judgeStep(env: ConsensusEnv, st: RunState, setup: SetupResult): WorkSte
             return second !== undefined && sameLabels(labelsOf(d.basedOn, la, lb), labelsOf(second, lb, la));
           });
           dropped = verdict.decisions.filter((d) => !keep.includes(d));
-          if (keep.length === 0) throw new StepFailure("exit_check", "the swapped-order judge pass agreed with none of the decisions");
+          if (keep.length === 0) {
+            // Not a failure: there are no order-robust preferences. Continue with an empty verdict.
+            ctx.record({ type: "warning", code: "no_robust_preferences", stepId: ctx.stepId, message: "the swapped-order judge pass agreed with none of the first pass's decisions; the verdict has no decisions" });
+          }
           verdict = { ...verdict, decisions: keep };
         }
-        const decisionJson = writeOut(ctx, "decision.json", JSON.stringify({ verdict, sides, invalidEvidence: bad.invalid, droppedBySwapPass: dropped }, null, 2) + "\n");
+        const noRobustPreferences = !!swapped && verdict.decisions.length === 0;
+        const decisionJson = writeOut(ctx, "decision.json", JSON.stringify({ verdict, sides, invalidEvidence: bad.invalid, droppedBySwapPass: dropped, noRobustPreferences }, null, 2) + "\n");
         const decisionMd = writeOut(ctx, "decision.md", renderDecision(verdict, sides, bad.invalid, dropped));
-        return { decisionJson, decisionMd, sides, scrubReplacements: replacements, invalidEvidence: bad.invalid } satisfies JudgeResult;
+        return { decisionJson, decisionMd, sides, scrubReplacements: replacements, invalidEvidence: bad.invalid, noRobustPreferences } satisfies JudgeResult;
       });
     },
     exitCheck: (_ctx, r) => {
       const j = r as JudgeResult;
-      const ok = fs.existsSync(j.decisionMd) && ConsensusVerdict.safeParse(JSON.parse(fs.readFileSync(j.decisionJson, "utf8")).verdict).success;
+      const saved = JSON.parse(fs.readFileSync(j.decisionJson, "utf8")) as { verdict: unknown; noRobustPreferences?: boolean };
+      // An empty verdict is valid only as the recorded outcome of the swapped-order pass.
+      const schema = saved.noRobustPreferences
+        ? ConsensusVerdict.extend({ decisions: z.array(ConsensusVerdict.shape.decisions.element).length(0) })
+        : ConsensusVerdict;
+      const ok = fs.existsSync(j.decisionMd) && schema.safeParse(saved.verdict).success;
       return ok ? { ok: true } : { ok: false, reason: "decision.md/decision.json missing or invalid" };
     },
   };
@@ -414,6 +426,9 @@ export function renderDecision(v: ConsensusVerdict, sides: JudgeResult["sides"],
     "## Decisions",
     "",
   ];
+  if (v.decisions.length === 0) {
+    out.push("No robust preferences: with A and B swapped, the judge agreed with none of its first-pass decisions.", "");
+  }
   v.decisions.forEach((d, i) => {
     out.push(`### ${i + 1}. ${d.topic}`, "", d.decision, "", `*Rationale:* ${d.rationale}`, "", `*Based on:* ${side(d.basedOn)}`, "", `*Evidence:* ${d.evidence.map((e) => `\`${e}\``).join(", ")}`, "");
   });

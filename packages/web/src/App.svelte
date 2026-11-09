@@ -1,4 +1,5 @@
 <script lang="ts">
+  import FileView from "./components/FileView.svelte";
   import Header from "./components/Header.svelte";
   import RunsList from "./components/RunsList.svelte";
   import RunView from "./components/RunView.svelte";
@@ -29,3 +30,4 @@
     {/key}
   {/if}
 </main>
+<FileView />

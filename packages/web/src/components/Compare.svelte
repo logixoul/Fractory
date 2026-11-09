@@ -2,6 +2,7 @@
   import { getJson } from "../lib/api.js";
   import type { RunState } from "../lib/types.js";
   import DiffView from "./DiffView.svelte";
+  import { refContext } from "../lib/refctx.js";
   import Markdown from "./Markdown.svelte";
 
   let { state: st }: { state: RunState } = $props();
@@ -89,7 +90,7 @@
       <section class="panel">
         <h3>{who(l)}{#if r?.noChanges}<span class="badge"> no changes</span>{/if}</h3>
         {#if r?.file}
-          {#key r.file}<Markdown runId={st.runId} file={r.file} root={st.repo} />{/key}
+          {#key r.file}<Markdown runId={st.runId} file={r.file} refs={refContext(st, { label: l })} />{/key}
         {:else}
           <p class="muted">not available yet</p>
         {/if}

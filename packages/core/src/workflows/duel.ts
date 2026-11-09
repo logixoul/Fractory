@@ -77,6 +77,10 @@ export interface DuelJudgeResult {
   invalidEvidence: string[];
   /** Items the swapped-order pass disagreed with (judge.swapOrderPass). */
   droppedBySwapPass: JudgeItem[];
+  /** No point survived the swapped-order pass: the verdict is empty (nothing to approve). */
+  noRobustPreferences: boolean;
+  /** Each contestant's head commit as judged (path:line evidence refers to these). */
+  heads: Record<string, string>;
 }
 
 export interface ApplyResult extends Partial<EditResult> {
@@ -508,11 +512,20 @@ function judgeStep(env: DuelEnv, st: RunState, setup: DuelSetup, maxFix: number)
               return second !== undefined && labelsOf(second, lb, la).join() === it.betterLabel;
             });
             dropped = items.filter((it) => !agreed.includes(it));
-            if (agreed.length === 0) throw new StepFailure("exit_check", "the swapped-order judge pass agreed with none of the items");
+            if (agreed.length === 0) {
+              // Not a failure: there are no order-robust preferences. Continue with an empty verdict.
+              ctx.record({ type: "warning", code: "no_robust_preferences", stepId: ctx.stepId, message: "the swapped-order judge pass agreed with none of the first pass's items; there is nothing to approve" });
+            }
             items = agreed;
           }
-          const verdictFile = writeOut(ctx, "verdict.json", JSON.stringify({ verdict: r.value, sides, items, invalidEvidence: bad.invalid, droppedBySwapPass: dropped }, null, 2) + "\n");
-          return { verdictFile, summary: r.value.summary, sides, items, invalidEvidence: bad.invalid, droppedBySwapPass: dropped } satisfies DuelJudgeResult;
+          const noRobustPreferences = !!swapped && items.length === 0;
+          const heads = { [la]: chains[la]!.head!.head, [lb]: chains[lb]!.head!.head };
+          const verdictFile = writeOut(
+            ctx,
+            "verdict.json",
+            JSON.stringify({ verdict: r.value, sides, heads, items, invalidEvidence: bad.invalid, droppedBySwapPass: dropped, noRobustPreferences }, null, 2) + "\n",
+          );
+          return { verdictFile, summary: r.value.summary, sides, items, invalidEvidence: bad.invalid, droppedBySwapPass: dropped, noRobustPreferences, heads } satisfies DuelJudgeResult;
         },
       );
     },
@@ -607,6 +620,7 @@ function reportStep(st: RunState, setup: DuelSetup, maxFix: number): WorkStep {
       }
       if (judge) {
         lines.push("", "## Judge", "", judge.summary, "", `Sides: A = ${judge.sides.A.workerId}, B = ${judge.sides.B.workerId}.`, "");
+        if (judge.noRobustPreferences) lines.push("No robust preferences: with A and B swapped, the judge agreed with none of its first-pass items, so there was nothing to approve.", "");
         judge.items.forEach((it, i) => {
           const mark = apply?.approvedItemIds.includes(i + 1) ? "[x]" : "[ ]";
           lines.push(`${mark} **${i + 1}. ${it.aspect}**: better ${it.betterSide} (${it.betterWorker}). ${it.recommendation} *Risk:* ${it.risk || "none stated"}. Evidence: ${it.evidence.map((e) => `\`${e}\``).join(", ")}`);

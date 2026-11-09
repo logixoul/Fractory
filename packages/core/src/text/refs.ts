@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { findRefs } from "@fractory/shared/refs";
 import { isInside, normCase, toPosix } from "../util/pathx.js";
 
 /**
@@ -21,26 +22,9 @@ export interface CheckedRefs {
   invalid: Ref[];
 }
 
-const SEG = String.raw`[\w@+\-.]+`;
-const REF_RE = new RegExp(
-  String.raw`((?:[A-Za-z]:[\\/]|[\\/])?(?:${SEG}[\\/])*${SEG})(?::(\d+)(?:[-–](\d+))?|#L(\d+)(?:-L?(\d+))?)`,
-  "g",
-);
-
-export function extractRefs(text: string): Omit<Ref, "path">[] {
-  const out: Omit<Ref, "path">[] = [];
-  for (const m of text.matchAll(REF_RE)) {
-    const p = m[1]!;
-    // Must look like a file: has a separator or an extension; not a URL scheme or a time (12:30).
-    if (!/[\\/]/.test(p) && !/\.\w+$/.test(p)) continue;
-    if (/^\d+$/.test(p) || p.endsWith(".")) continue;
-    // Part of a URL (scheme://host/...): the match starts right after "scheme:/".
-    if (/[a-z][\w+.-]*:\/?$/i.test(text.slice(Math.max(0, m.index - 16), m.index))) continue;
-    const start = Number(m[2] ?? m[4]);
-    const end = m[3] ?? m[5];
-    out.push({ raw: m[0], line: start, ...(end !== undefined ? { endLine: Number(end) } : {}) });
-  }
-  return out;
+/** Refs as written (the extractor lives in @fractory/shared, also used by the GUI). */
+export function extractRefs(text: string): (Omit<Ref, "path"> & { written: string })[] {
+  return findRefs(text).map((r) => ({ raw: r.raw, written: r.path, line: r.line, ...(r.endLine !== undefined ? { endLine: r.endLine } : {}) }));
 }
 
 /** Maps a written path to repo-relative posix, using `roots` for absolute paths. */
@@ -92,9 +76,9 @@ export function checkRefs(text: string, root: string, extraRoots: readonly strin
   const valid: Ref[] = [];
   const invalid: Ref[] = [];
   for (const r of extractRefs(text)) {
-    const written = r.raw.slice(0, r.raw.length - (r.raw.match(/(?::\d+(?:[-–]\d+)?|#L\d+(?:-L?\d+)?)$/)?.[0].length ?? 0));
-    const rel = toRepoRelative(written, roots);
-    const ref: Ref = { ...r, path: rel };
+    const rel = toRepoRelative(r.written, roots);
+    const { written: _w, ...rest } = r;
+    const ref: Ref = { ...rest, path: rel };
     const key = `${rel ?? r.raw}:${r.line}`;
     if (seen.has(key)) continue;
     seen.add(key);

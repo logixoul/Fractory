@@ -28,7 +28,11 @@
 body { margin: 0; background: var(--bg); color: var(--fg); }
 main { padding: 16px; max-width: 1600px; margin: 0 auto; }
 a { color: var(--accent); }
-a.ref { text-decoration: underline dotted; }
+a.ref { text-decoration: underline dotted; cursor: pointer; }
+a.ref.unresolved { color: var(--muted); cursor: default; }
+/* Monaco decorations for the line/range a ref points at (global: Monaco renders outside components). */
+.monaco-editor .ref-line { background: color-mix(in srgb, var(--warn) 22%, transparent); }
+.monaco-editor .ref-gutter { border-left: 3px solid var(--warn); }
 button {
   font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border);
   background: var(--panel); color: var(--fg); cursor: pointer;

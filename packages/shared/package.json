@@ -1,0 +1,18 @@
+{
+  "name": "@fractory/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Node-free code shared by core and the GUI: event schemas, run-state types, path:line refs.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./events": { "types": "./dist/events.d.ts", "default": "./dist/events.js" },
+    "./state": { "types": "./dist/state.d.ts", "default": "./dist/state.js" },
+    "./refs": { "types": "./dist/refs.d.ts", "default": "./dist/refs.js" }
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  }
+}

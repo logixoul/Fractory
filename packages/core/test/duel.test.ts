@@ -215,6 +215,33 @@ describe("duel workflow", () => {
     expect(fs.readFileSync((st.result as { reportMd: string }).reportMd, "utf8")).toContain("1 fix iteration(s) after apply");
   });
 
+  it("judge.swapOrderPass with no surviving item: no_robust_preferences, empty approval, run completes", async () => {
+    const { data, store, run } = await setup({ judge: { swapOrderPass: true } });
+    // pass 1: item 1 → A, item 2 → B. Swapped (A↔B): "A" for item 1 and "B" for item 2 both disagree.
+    const glm = judgeWorker([
+      { index: 1, side: "A" },
+      { index: 2, side: "B" },
+    ]);
+    const workers = { opus: worker("opus", { implement: () => write(WITH_DIV) }), deepseek: worker("deepseek", { implement: () => write(WITH_DIV) }), glm };
+    let st = await driveRun(run, { dataDir: data, workers });
+    expect(st.status).toBe("awaiting_approval");
+    expect(st.approval!.items).toEqual([]);
+    expect(st.steps.judge!.result).toMatchObject({ noRobustPreferences: true, items: [] });
+    expect(st.warnings.map((w) => w.code)).toContain("no_robust_preferences");
+    approveRun(store.open(run.runId), []);
+    st = await driveRun(store.open(run.runId), { dataDir: data, workers });
+    expect(st.status).toBe("completed");
+    expect(st.steps.apply!.result).toMatchObject({ skipped: true });
+    expect(fs.readFileSync((st.result as { reportMd: string }).reportMd, "utf8")).toContain("No robust preferences");
+  });
+
+  it("the judge result records each side's head commit as judged (refs point there)", async () => {
+    const { data, run } = await setup({ checks: [] });
+    const st = await driveRun(run, { dataDir: data, workers: { opus: worker("opus", { implement: () => write(WITH_DIV) }), deepseek: worker("deepseek", { implement: () => write(WITH_DIV) }), glm: judgeWorker() } });
+    const heads = (st.steps.judge!.result as { heads: Record<string, string> }).heads;
+    for (const l of Object.keys(st.labels)) expect(heads[l]).toBe((st.steps[`implement.${l}`]!.result as { head: string }).head);
+  });
+
   it("judge.swapOrderPass keeps only items both passes agree on", async () => {
     const { data, run } = await setup({ judge: { swapOrderPass: true } });
     // pass 1: item 1 → A, item 2 → B. Swap pass (A/B exchanged): "B" for item 1 agrees, "B" for item 2 does not.

@@ -9,6 +9,12 @@
       ],
       "@fractory/daemon": [
         "../daemon/src/index.ts"
+      ],
+      "@fractory/shared": [
+        "../shared/src/index.ts"
+      ],
+      "@fractory/shared/*": [
+        "../shared/src/*.ts"
       ]
     }
   },

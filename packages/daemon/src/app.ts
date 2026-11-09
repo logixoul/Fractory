@@ -204,14 +204,18 @@ export function createApp(d: AppDeps): Hono {
     return c.json(await changedFiles(st.repo, setup.base, worktreeBranch(st.runId, label)));
   });
 
+  // A file at a commit of this run: "base", a duel contestant label (its branch), or a commit
+  // sha recorded in the run (checkpoints, step heads). Never an arbitrary ref of the repo.
   app.get("/api/runs/:id/blob", async (c) => {
     const st = runOf(c).state();
-    const setup = duelSetup(st);
     const rev = c.req.query("rev") ?? "";
     const file = c.req.query("path") ?? "";
-    if (!setup) return c.json({ error: "not a duel run" }, 404);
-    const commit = rev === "base" ? setup.base : setup.branches[rev] ? worktreeBranch(st.runId, rev) : undefined;
-    if (!commit) return c.json({ error: "rev must be 'base' or a contestant label" }, 400);
+    const base = setupBase(st);
+    if (!base) return c.json({ error: "the run has no base commit yet" }, 404);
+    const branches = duelSetup(st)?.branches ?? {};
+    const commit =
+      rev === "base" ? base : branches[rev] ? worktreeBranch(st.runId, rev) : /^[0-9a-f]{40}$/.test(rev) && recordedCommits(st).has(rev) ? rev : undefined;
+    if (!commit) return c.json({ error: "rev must be 'base', a contestant label, or a commit recorded in this run" }, 400);
     // Repo-relative paths only (the file is read from a commit, never from disk).
     if (file === "" || file.startsWith("/") || file.startsWith("-") || file.split(/[\\/]/).includes("..") || /^[A-Za-z]:/.test(file)) {
       return c.json({ error: "invalid path" }, 400);
@@ -269,6 +273,31 @@ export function createApp(d: AppDeps): Hono {
 }
 
 class BadRequest extends Error {}
+
+type StepsLike = { steps: Record<string, { status: string; checkpoint?: string; result?: unknown }> };
+
+function setupBase(st: StepsLike): string | undefined {
+  const r = st.steps.setup?.status === "completed" ? (st.steps.setup.result as { base?: unknown }) : undefined;
+  return typeof r?.base === "string" ? r.base : undefined;
+}
+
+/** Commit shas recorded in the run: base, checkpoints, and every step result's head/sha/heads. */
+export function recordedCommits(st: StepsLike): Set<string> {
+  const out = new Set<string>();
+  const add = (v: unknown) => {
+    if (typeof v === "string" && /^[0-9a-f]{40}$/.test(v)) out.add(v);
+  };
+  for (const s of Object.values(st.steps)) {
+    add(s.checkpoint);
+    const r = s.result as Record<string, unknown> | undefined;
+    if (!r || typeof r !== "object") continue;
+    add(r.base);
+    add(r.head);
+    add(r.sha);
+    if (r.heads && typeof r.heads === "object") for (const h of Object.values(r.heads as Record<string, unknown>)) add(h);
+  }
+  return out;
+}
 
 function duelSetup(st: { workflow: string; steps: Record<string, { status: string; result?: unknown }> }) {
   const r = st.steps.setup?.status === "completed" ? (st.steps.setup.result as { base?: string; branches?: Record<string, string> }) : undefined;

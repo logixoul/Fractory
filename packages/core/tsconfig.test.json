@@ -1,5 +1,20 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "noEmit": true, "rootDir": "." },
-  "include": ["src", "test", "assets"]
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "..",
+    "paths": {
+      "@fractory/shared": [
+        "../shared/src/index.ts"
+      ],
+      "@fractory/shared/*": [
+        "../shared/src/*.ts"
+      ]
+    }
+  },
+  "include": [
+    "src",
+    "test",
+    "assets"
+  ]
 }

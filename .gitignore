@@ -6,3 +6,5 @@ dist/
 *.log
 .fractory/
 coverage/
+test-results/
+playwright-report/

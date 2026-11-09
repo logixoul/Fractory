@@ -246,4 +246,27 @@ describe("3. consensus judge.swapOrderPass", () => {
     expect(j.droppedBySwapPass.map((d: { topic: string }) => d.topic)).toEqual(["flip"]);
     expect(fs.readFileSync((st.steps.judge!.result as { decisionMd: string }).decisionMd, "utf8")).toContain("Dropped by the swapped-order pass");
   });
+
+  it("no surviving decision: no_robust_preferences, an empty verdict, and the run completes", async () => {
+    const repo = initRepo({ "math.js": "export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\nexport const mul = (a, b) => a * b;\n" });
+    const data = dataDir();
+    const store = new RunStore(data, new Redactor());
+    const prompt = path.join(tmpDir(), "p.md");
+    fs.writeFileSync(prompt, "Add div.\n");
+    const config = testConfig({ workers: { opus: { kind: "fake" }, deepseek: { kind: "fake" }, glm: { kind: "fake" } }, judge: { swapOrderPass: true } });
+    const run = await createRun(store, { workflow: "consensus", repo, promptFile: prompt, config });
+    const contestant = (id: string) =>
+      new FakeWorker(id, (t) => (t.outFile?.endsWith("revise.json") ? { structured: { noChanges: true, proposal: "", changeSummary: "" } } : { finalText: `${id} math.js:1 math.js:2 math.js:3` }));
+    const verdict = { summary: "s", decisions: [{ topic: "t", decision: "d", rationale: "r", basedOn: "A", evidence: ["math.js:1"] }], unresolved: [] };
+    // A in pass 1; "A" again after swapping means the other contestant: disagreement.
+    const glm = new FakeWorker("glm", (t) => (t.outFile?.endsWith("swap.json") ? { structured: { verdicts: [{ index: 1, side: "A" }] } } : { structured: verdict }));
+    const st = await driveRun(run, { dataDir: data, workers: { opus: contestant("opus"), deepseek: contestant("deepseek"), glm } });
+    expect(st.failure).toBeUndefined();
+    expect(st.status).toBe("completed");
+    expect(st.steps.judge!.result).toMatchObject({ noRobustPreferences: true });
+    expect(st.warnings.map((w) => w.code)).toContain("no_robust_preferences");
+    const j = JSON.parse(fs.readFileSync((st.steps.judge!.result as { decisionJson: string }).decisionJson, "utf8"));
+    expect(j.verdict.decisions).toEqual([]);
+    expect(fs.readFileSync((st.steps.judge!.result as { decisionMd: string }).decisionMd, "utf8")).toContain("No robust preferences");
+  });
 });

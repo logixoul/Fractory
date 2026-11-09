@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { stripTokenFromUrl } from "../src/lib/api.js";
 import { buildPanes, paneKey, phaseStatuses } from "../src/lib/panes.js";
-import { findRefs, vscodeHref } from "../src/lib/refs.js";
+import { findRefs } from "@fractory/shared/refs";
+import { toRepoRelative, vscodeHref } from "../src/lib/refs.js";
+import { latestHead, refContext, vscodeTarget } from "../src/lib/refctx.js";
 import type { RunEvent, RunState } from "../src/lib/types.js";
 
 let seq = 0;
@@ -61,18 +63,61 @@ describe("phase indicator", () => {
   });
 });
 
-describe("refs → vscode links", () => {
-  it("finds refs like core does, skipping URLs", () => {
-    expect(findRefs("see src/a.ts:12 and https://x.io/a.js:3 and C:\\r\\b.ts:4").map((r) => [r.path, r.line])).toEqual([
-      ["src/a.ts", 12],
-      ["C:\\r\\b.ts", 4],
+describe("refs → in-app file view", () => {
+  it("uses the shared extractor (same forms as core), skipping URLs", () => {
+    expect(findRefs("see src/a.ts:12 and https://x.io/a.js:3 and C:\\r\\b.ts:4-6").map((r) => [r.path, r.line, r.endLine])).toEqual([
+      ["src/a.ts", 12, undefined],
+      ["C:\\r\\b.ts", 4, 6],
     ]);
   });
 
-  it("builds vscode://file URLs for relative and absolute paths", () => {
-    expect(vscodeHref("C:\\Users\\me\\repo", "src/a b.ts", 3)).toBe("vscode://file/C:/Users/me/repo/src/a%20b.ts:3");
-    expect(vscodeHref("/home/me/repo/", "./x.ts", 1)).toBe("vscode://file/home/me/repo/x.ts:1");
-    expect(vscodeHref("/r", "D:\\y\\z.ts", 9)).toBe("vscode://file/D:/y/z.ts:9");
+  it("maps written paths to repo-relative ones through the known roots", () => {
+    const roots = ["C:\\data\\worktrees\\r1\\a1b2", "C:\\Users\\me\\repo"];
+    expect(toRepoRelative("src/a.ts", roots)).toBe("src/a.ts");
+    expect(toRepoRelative("./src/a.ts", roots)).toBe("src/a.ts");
+    expect(toRepoRelative("C:\\data\\worktrees\\r1\\a1b2\\src\\a.ts", roots)).toBe("src/a.ts");
+    expect(toRepoRelative("c:/users/me/repo/x.ts", roots)).toBe("x.ts");
+    expect(toRepoRelative("D:\\elsewhere\\x.ts", roots)).toBeNull();
+    expect(toRepoRelative("../x.ts", roots)).toBeNull();
+  });
+
+  const st = (over: Record<string, unknown> = {}) =>
+    ({
+      runId: "20261109-000000-abcd",
+      workflow: "duel",
+      repo: "C:\\Users\\me\\repo",
+      labels: { a1b2: "opus", c3d4: "deepseek" },
+      stepOrder: ["setup", "implement.a1b2", "apply"],
+      steps: {
+        setup: { id: "setup", status: "completed", result: { base: "b0", judgeLabel: "e5f6", worktrees: { a1b2: "C:\\wt\\a1b2", c3d4: "C:\\wt\\c3d4", e5f6: "C:\\wt\\e5f6" } } },
+        "implement.a1b2": { id: "implement.a1b2", label: "a1b2", status: "completed", result: { head: "h1" } },
+        apply: { id: "apply", label: "a1b2", status: "completed", result: { head: "h2" } },
+      },
+      ...over,
+    }) as unknown as RunState;
+
+  it("VS Code opens the worktree when it exists, labelled; notes when it has moved on", () => {
+    const atJudging = refContext(st(), { label: "a1b2", rev: "h1", revTitle: "opus head at judging" });
+    expect(latestHead(st(), "a1b2")).toBe("h2");
+    expect(atJudging.worktree).toEqual({ path: "C:\\wt\\a1b2", label: "opus (a1b2)", atRev: false });
+    const t = vscodeTarget(atJudging, "src/a.ts", 7);
+    expect(t.href).toBe("vscode://file/C:/wt/a1b2/src/a.ts:7");
+    expect(t.label).toBe("Open in VS Code: opus (a1b2) worktree");
+    expect(t.note).toMatch(/moved on/);
+  });
+
+  it("falls back to the main repo with a note once the worktrees are removed", () => {
+    const ctx = refContext(st({ cleaned: { at: "x", paths: [] } }), { label: "a1b2" });
+    expect(ctx.worktree).toBeUndefined();
+    expect(ctx.rev).toBe("base");
+    const t = vscodeTarget(ctx, "src/a b.ts", 3);
+    expect(t.href).toBe("vscode://file/C:/Users/me/repo/src/a%20b.ts:3");
+    expect(t.label).toBe("Open in VS Code: main repository");
+    expect(t.note).toMatch(/may differ/);
+  });
+
+  it("vscode hrefs for POSIX roots", () => {
+    expect(vscodeHref("/home/me/repo/", "x.ts", 1)).toBe("vscode://file/home/me/repo/x.ts:1");
   });
 });
 

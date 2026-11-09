@@ -1,13 +1,17 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
+const src = (p: string) => fileURLToPath(new URL(p, import.meta.url));
+
 export default defineConfig({
   resolve: {
-    // Tests run against core's sources, not its built dist/.
-    alias: {
-      "@fractory/core": fileURLToPath(new URL("./packages/core/src/index.ts", import.meta.url)),
-      "@fractory/daemon": fileURLToPath(new URL("./packages/daemon/src/index.ts", import.meta.url)),
-    },
+    // Tests run against the packages' sources, not their built dist/.
+    alias: [
+      { find: /^@fractory\/shared$/, replacement: src("./packages/shared/src/index.ts") },
+      { find: /^@fractory\/shared\/(.*)$/, replacement: src("./packages/shared/src/") + "$1.ts" },
+      { find: /^@fractory\/core$/, replacement: src("./packages/core/src/index.ts") },
+      { find: /^@fractory\/daemon$/, replacement: src("./packages/daemon/src/index.ts") },
+    ],
   },
   test: {
     include: ["packages/*/test/**/*.test.ts"],

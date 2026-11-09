@@ -1,43 +1,47 @@
-// path:line references in rendered text → vscode://file/... links (spec: compare view).
-// Same accepted forms as core's text/refs.ts (duplicated: the GUI cannot import Node code).
+// path:line refs in rendered text → in-app file view at the commit the ref was made against.
+// The extractor is shared with core (@fractory/shared/refs); this module only maps paths and
+// builds the links.
+import { findRefs } from "@fractory/shared/refs";
 
-const SEG = String.raw`[\w@+\-.]+`;
-export const REF_RE = new RegExp(String.raw`((?:[A-Za-z]:[\\/]|[\\/])?(?:${SEG}[\\/])*${SEG})(?::(\d+)(?:[-–]\d+)?|#L(\d+)(?:-L?\d+)?)`, "g");
-
-export interface FoundRef {
-  index: number;
-  length: number;
-  path: string;
+export interface RefHit {
+  /** Repo-relative posix path, or null if it points outside the known roots. */
+  path: string | null;
+  /** As written. */
+  written: string;
   line: number;
-}
-
-export function findRefs(text: string): FoundRef[] {
-  const out: FoundRef[] = [];
-  for (const m of text.matchAll(REF_RE)) {
-    const p = m[1]!;
-    if (!/[\\/]/.test(p) && !/\.\w+$/.test(p)) continue;
-    if (/^\d+$/.test(p) || p.endsWith(".")) continue;
-    if (/[a-z][\w+.-]*:\/?$/i.test(text.slice(Math.max(0, m.index - 16), m.index))) continue; // URL
-    out.push({ index: m.index, length: m[0].length, path: p, line: Number(m[2] ?? m[3]) });
-  }
-  return out;
+  endLine?: number;
+  raw: string;
 }
 
 const isAbsolute = (p: string) => /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("/") || p.startsWith("\\");
+const fwd = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
 
-/** vscode://file/<abs>:<line>; relative paths are resolved against `root` (the user's repo). */
-export function vscodeHref(root: string, p: string, line: number): string {
-  const abs = isAbsolute(p) ? p : `${root.replace(/[\\/]+$/, "")}/${p.replace(/^\.?[\\/]/, "")}`;
-  const fwd = abs.replace(/\\/g, "/");
-  return `vscode://file/${encodeURI(fwd.startsWith("/") ? fwd.slice(1) : fwd)}:${line}`;
+/** Repo-relative form of a written path; absolute paths must lie under one of `roots`. */
+export function toRepoRelative(written: string, roots: readonly string[]): string | null {
+  const p = fwd(written);
+  if (!isAbsolute(written)) {
+    const parts = p.replace(/^\.\//, "").split("/");
+    return parts.includes("..") ? null : parts.join("/");
+  }
+  for (const r of [...roots].map(fwd).sort((a, b) => b.length - a.length)) {
+    // Windows/macOS paths: compare case-insensitively (the daemon validates the final path anyway).
+    if (p.toLowerCase().startsWith(r.toLowerCase() + "/")) return p.slice(r.length + 1);
+  }
+  return null;
 }
 
-/** Wraps refs in text nodes under `el` (including inside <code>) with vscode links. */
-export function linkifyRefs(el: HTMLElement, root: string): void {
+/** vscode://file/<abs>:<line>, from a root directory and a repo-relative path. */
+export function vscodeHref(root: string, rel: string, line: number): string {
+  const abs = `${fwd(root)}/${rel}`;
+  return `vscode://file/${encodeURI(abs.startsWith("/") ? abs.slice(1) : abs)}:${line}`;
+}
+
+/** Wraps refs in text nodes under `el` (including inside <code>) with in-app links. */
+export function linkifyRefs(el: HTMLElement, roots: readonly string[], onOpen: (hit: RefHit) => void): void {
   const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
   const nodes: Text[] = [];
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-    if ((n.parentElement?.closest("a") ?? null) === null) nodes.push(n as Text);
+    if ((n.parentElement?.closest("a, button") ?? null) === null) nodes.push(n as Text);
   }
   for (const node of nodes) {
     const text = node.data;
@@ -47,11 +51,16 @@ export function linkifyRefs(el: HTMLElement, root: string): void {
     let at = 0;
     for (const r of refs) {
       frag.append(text.slice(at, r.index));
+      const hit: RefHit = { path: toRepoRelative(r.path, roots), written: r.path, line: r.line, raw: r.raw, ...(r.endLine !== undefined ? { endLine: r.endLine } : {}) };
       const a = document.createElement("a");
-      a.href = vscodeHref(root, r.path, r.line);
-      a.className = "ref";
-      a.title = "open in VS Code";
-      a.textContent = text.slice(r.index, r.index + r.length);
+      a.href = "#";
+      a.className = hit.path ? "ref" : "ref unresolved";
+      a.title = hit.path ? `view ${hit.path}:${hit.line}` : "path outside the repository";
+      a.textContent = r.raw;
+      a.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        if (hit.path) onOpen(hit);
+      });
       frag.append(a);
       at = r.index + r.length;
     }

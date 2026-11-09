@@ -236,6 +236,12 @@ describe("daemon security", () => {
     const dec = await api(d, "GET", `/api/runs/${runId}/file?path=${encodeURIComponent("steps/judge/out/decision.md")}`);
     expect(dec.status).toBe(200);
     expect(dec.headers["content-type"]).toBe("text/plain; charset=utf-8");
+    // consensus refs: files at the base commit (no branches in consensus)
+    const blob = await api(d, "GET", `/api/runs/${runId}/blob?rev=base&path=math.js`);
+    expect(blob.status).toBe(200);
+    expect(blob.body).toContain("export const add");
+    const gone = await api(d, "GET", `/api/runs/${runId}/blob?rev=base&path=nope.js`);
+    expect(gone.headers["x-fractory-missing"]).toBe("1");
   });
 });
 
@@ -299,6 +305,13 @@ describe("daemon API", () => {
     for (const bad of ["rev=base&path=../x", "rev=main&path=math.js", "rev=base&path=C:/x", "rev=base&path=--output=x"]) {
       expect((await api(d, "GET", `/api/runs/${runId}/blob?${bad}`)).status).toBe(400);
     }
+    // refs open files at the commit they were made against: recorded commits only
+    const heads = (done.steps as Record<string, { result: { heads: Record<string, string> } }>).judge!.result.heads;
+    const atJudging = await api(d, "GET", `/api/runs/${runId}/blob?rev=${heads[labels[0]!]}&path=math.js`);
+    expect(atJudging.status).toBe(200);
+    expect(atJudging.body).toContain("div");
+    expect((await api(d, "GET", `/api/runs/${runId}/blob?rev=${"0".repeat(40)}&path=math.js`)).status).toBe(400);
+    expect((await api(d, "GET", `/api/runs/${runId}/blob?rev=HEAD~1&path=math.js`)).status).toBe(400);
     // clean (guarded worktree removal, branches kept) and gc
     const cleaned = await api(d, "POST", `/api/runs/${runId}/clean`);
     expect(cleaned.status).toBe(200);
