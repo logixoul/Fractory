@@ -282,22 +282,25 @@ describe("3. consensus judge.swapOrderPass", () => {
   });
 
   it("a decision both proposals contain survives every attribution the swapped pass gives it", async () => {
-    for (const side of ["A", "B", "both", "neither"] as const) {
-      const { data, run } = await swapRun();
-      const contestant = (id: string) =>
-        new FakeWorker(id, (t) =>
-          t.outFile?.endsWith("revise.json") ? { structured: { noChanges: true, proposal: "", changeSummary: "" } } : { finalText: "put div in math.js math.js:1 math.js:2 math.js:3" },
-        );
-      const verdict = { summary: "s", decisions: [{ topic: "div", decision: "put div in math.js", rationale: "r", basedOn: "both", evidence: ["math.js:3"] }], unresolved: [] };
-      const glm = new FakeWorker("glm", (t) => (t.outFile?.endsWith("swap.json") ? { structured: { verdicts: [{ index: 1, adopt: true, side }] } } : { structured: verdict }));
-      const st = await driveRun(run, { dataDir: data, workers: { opus: contestant("opus"), deepseek: contestant("deepseek"), glm } });
-      expect(st.status).toBe("completed");
-      const j = JSON.parse(fs.readFileSync((st.steps.judge!.result as { decisionJson: string }).decisionJson, "utf8"));
-      const d = j.verdict.decisions as { topic: string; attributionUnstable?: boolean }[];
-      expect(d.map((x) => x.topic)).toEqual(["div"]);
-      expect(d[0]!.attributionUnstable ?? false).toBe(side !== "both");
-      expect(j.droppedBySwapPass).toEqual([]);
-    }
+    const sides = ["A", "B", "both", "neither"] as const;
+    const { data, run } = await swapRun();
+    const contestant = (id: string) =>
+      new FakeWorker(id, (t) =>
+        t.outFile?.endsWith("revise.json") ? { structured: { noChanges: true, proposal: "", changeSummary: "" } } : { finalText: "put div in math.js math.js:1 math.js:2 math.js:3" },
+      );
+    const verdict = {
+      summary: "s",
+      decisions: sides.map((side) => ({ topic: `div-${side}`, decision: "put div in math.js", rationale: "r", basedOn: "both", evidence: ["math.js:3"] })),
+      unresolved: [],
+    };
+    const swapVerdicts = sides.map((side, i) => ({ index: i + 1, adopt: true, side }));
+    const glm = new FakeWorker("glm", (t) => (t.outFile?.endsWith("swap.json") ? { structured: { verdicts: swapVerdicts } } : { structured: verdict }));
+    const st = await driveRun(run, { dataDir: data, workers: { opus: contestant("opus"), deepseek: contestant("deepseek"), glm } });
+    expect(st.status).toBe("completed");
+    const j = JSON.parse(fs.readFileSync((st.steps.judge!.result as { decisionJson: string }).decisionJson, "utf8"));
+    const d = j.verdict.decisions as { topic: string; attributionUnstable?: boolean }[];
+    expect(d.map((x) => [x.topic, x.attributionUnstable ?? false])).toEqual(sides.map((side) => [`div-${side}`, side !== "both"]));
+    expect(j.droppedBySwapPass).toEqual([]);
   });
 
   it("judge inputs: revision summaries per side, and critiques labelled with the draft they target", async () => {

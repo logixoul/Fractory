@@ -18,7 +18,7 @@ export function tmpDir(prefix = "fractory-test-"): string {
 }
 
 afterEach(() => {
-  for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 export function testConfig(overrides: unknown = {}): Config {

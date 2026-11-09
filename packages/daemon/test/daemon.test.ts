@@ -3,8 +3,8 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { FakeWorker, fakeQuotaExhausted, type Config, type WorkerTask } from "@fractory/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { FakeWorker, fakeQuotaExhausted, RunStore, type Config, type WorkerTask } from "@fractory/core";
 import { startDaemon, type Daemon } from "../src/server.js";
 
 const cleanups: (() => Promise<void> | void)[] = [];
@@ -341,8 +341,32 @@ describe("daemon new-run form", () => {
     expect((await api(d, "GET", "/api/start-info")).json).toEqual({ defaultRepo: home, recentRepos: [] });
     const r1 = repo();
     const r2 = repo();
-    await waitStatus(d, await startRun(d, "consensus", r1), ["completed"]);
-    await waitStatus(d, await startRun(d, "consensus", r2), ["completed"]);
+    const store = new RunStore(d.data);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      for (const [i, repo] of [r1, r2].entries()) {
+        vi.setSystemTime(new Date(2000 + i, 0, 1));
+        const run = store.create({
+          workflow: "consensus",
+          repo,
+          promptFile: "prompt.md",
+          promptSha256: "0".repeat(64),
+          labels: { a: "opus", b: "deepseek" },
+          roles: { contestants: ["opus", "deepseek"], judge: "glm" },
+          seed: 42,
+          config: {},
+          fractoryVersion: "test",
+        });
+        const release = run.acquireWriter();
+        try {
+          run.append({ type: "run_completed" });
+        } finally {
+          release();
+        }
+      }
+    } finally {
+      vi.useRealTimers();
+    }
     await waitStatus(d, await startRun(d, "consensus", r1), ["completed"]);
     expect((await api(d, "GET", "/api/start-info")).json).toEqual({ defaultRepo: home, recentRepos: [r1, r2] });
     const bare = await daemon();
