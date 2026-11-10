@@ -31,7 +31,7 @@ export async function withGates<T>(ctx: StepContext, g: GateSpec, body: () => Pr
     mainRepo: g.targets.mainRepo,
     worktrees: Object.fromEntries(Object.entries(g.targets.worktrees).filter(([l]) => !sibling.has(l))),
   };
-  const before = await takeBaseline(targets, snap, g.inputsDir);
+  const before = await takeBaseline(targets, snap, g.inputsDir, ctx.snapshots);
   const links = escapingLinksByLabel(before);
   if (Object.keys(links).length > 0) {
     throw new StepFailure("integrity", `worktree links escape their worktree; refusing to start: ${JSON.stringify(links)}`);
@@ -41,11 +41,11 @@ export async function withGates<T>(ctx: StepContext, g: GateSpec, body: () => Pr
   try {
     result = await body();
   } catch (e) {
-    const v = await evaluateGates(before, targets, snap, g.writableLabel !== undefined ? { writableLabel: g.writableLabel } : {}, g.inputsDir).catch(() => undefined);
+    const v = await evaluateGates(before, targets, snap, g.writableLabel !== undefined ? { writableLabel: g.writableLabel } : {}, g.inputsDir, ctx.snapshots).catch(() => undefined);
     if (v) await restoreViolations(v, g);
     throw e;
   }
-  const v = await evaluateGates(before, targets, snap, g.writableLabel !== undefined ? { writableLabel: g.writableLabel } : {}, g.inputsDir);
+  const v = await evaluateGates(before, targets, snap, g.writableLabel !== undefined ? { writableLabel: g.writableLabel } : {}, g.inputsDir, ctx.snapshots);
   if (v.inputsChanged.length > 0) {
     throw new StepFailure("integrity", `step inputs/ changed during the step: ${v.inputsChanged.map((c) => c.path).join(", ")}`);
   }

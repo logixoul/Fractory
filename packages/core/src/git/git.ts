@@ -38,7 +38,39 @@ export function gitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv
   };
 }
 
+/** Subcommands that can change the index or the set of worktrees (conservative allowlist). */
+const INDEX_MUTATORS = new Set([
+  "add", "commit", "reset", "clean", "checkout", "switch", "restore", "rm", "mv", "merge", "rebase",
+  "cherry-pick", "revert", "stash", "apply", "am", "pull", "read-tree", "update-index", "worktree",
+]);
+
+let mutationEpoch = 0;
+
+/** Bumps whenever fractory itself runs a git command that may change a tree's tracked files. */
+export function gitMutationEpoch(): number {
+  return mutationEpoch;
+}
+
+function firstSubcommand(args: readonly string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "-c") i++;
+    else if (!args[i]!.startsWith("-")) return args[i];
+  }
+  return undefined;
+}
+
 export async function git(args: readonly string[], o: GitOptions): Promise<RunResult> {
+  const sub = firstSubcommand(args);
+  const mutates = sub !== undefined && INDEX_MUTATORS.has(sub);
+  if (mutates) mutationEpoch++;
+  try {
+    return await gitInner(args, o);
+  } finally {
+    if (mutates) mutationEpoch++;
+  }
+}
+
+async function gitInner(args: readonly string[], o: GitOptions): Promise<RunResult> {
   const r = await runProcess({
     command: "git",
     args: [...BASE_FLAGS, ...args],

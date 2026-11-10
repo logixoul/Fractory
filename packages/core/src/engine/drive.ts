@@ -1,5 +1,6 @@
 import * as os from "node:os";
 import { stepTiming } from "@fractory/shared/timing";
+import { SnapshotCache } from "../git/snapshot.js";
 import type { StepFailureKind } from "../schemas/run-events.js";
 import { TERMINAL_STATUSES, type RunState } from "../state/reducer.js";
 import type { RunHandle } from "../store/run-store.js";
@@ -28,6 +29,14 @@ const isGate = (s: StepDef): s is ApprovalGate => s.kind === "approval_gate";
  * needs_attention). Idempotent and resumable: completed steps are never rerun; a step
  * that was started but never finished (crash) is marked abandoned and rerun.
  */
+const snapshotCaches = new WeakMap<RunHandle, SnapshotCache>();
+
+function snapshotCacheFor(run: RunHandle): SnapshotCache {
+  let c = snapshotCaches.get(run);
+  if (!c) snapshotCaches.set(run, (c = new SnapshotCache()));
+  return c;
+}
+
 export async function drive(run: RunHandle, wf: WorkflowDef, deps: EngineDeps, opts: DriveOptions = {}): Promise<RunState> {
   const now = deps.now ?? Date.now;
   const release = run.acquireWriter();
@@ -304,6 +313,7 @@ async function runStepAttempt(
     signal: ac.signal,
     stepDir: run.stepDir(step.id),
     config: deps.config,
+    snapshots: snapshotCacheFor(run),
     state: () => run.state(),
     record: (ev) => {
       run.append(ev);

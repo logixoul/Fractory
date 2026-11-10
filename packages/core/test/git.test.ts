@@ -5,7 +5,7 @@ import { checkpoint, commitStepResult, restoreCheckpoint } from "../src/git/chec
 import { escapingLinksByLabel, evaluateGates, gatesPassed, hashInputs, takeBaseline } from "../src/git/gates.js";
 import { commitAll, revParse, squashedDiff } from "../src/git/git.js";
 import { GuardError, assertWorktreeTarget, guardedClean, guardedResetHard, guardedWorktreeRemove } from "../src/git/guard.js";
-import { diffSnapshots, escapingLinks, parsePorcelainZ, takeSnapshot } from "../src/git/snapshot.js";
+import { SnapshotCache, diffSnapshots, escapingLinks, parsePorcelainZ, takeSnapshot } from "../src/git/snapshot.js";
 import { ensureWorktree, worktreeBranch, worktreePath } from "../src/git/worktree.js";
 import { DEFAULT_EXCLUDE_DIRS } from "../src/schemas/config.js";
 import { tmpDir } from "./helpers.js";
@@ -32,6 +32,25 @@ describe("worktrees", () => {
     expect(g(a.path, "branch", "--show-current").trim()).toBe("fractory/20261108-000000-abcd/a1b2");
     const again = await ensureWorktree({ repo, dataDir: data, runId: "20261108-000000-abcd", label: "a1b2", base });
     expect(again).toEqual(a);
+  });
+
+  it("recovers a stale registration whose directory was deleted behind git's back", async () => {
+    const { repo, data, base, a } = await setup();
+    fs.rmSync(a.path, { recursive: true, force: true });
+    const again = await ensureWorktree({ repo, dataDir: data, runId: "20261108-000000-abcd", label: "a1b2", base });
+    expect(again.head).toBe(base);
+    expect(g(again.path, "branch", "--show-current").trim()).toBe(a.branch);
+  });
+
+  it("reports the real head of an existing branch advanced past base", async () => {
+    const { repo, data, base, a } = await setup();
+    fs.writeFileSync(path.join(a.path, "adv.txt"), "x");
+    const advanced = await commitAll(a.path, { emptyHooksDir: path.join(data, "empty-hooks"), message: "adv" });
+    fs.rmSync(a.path, { recursive: true, force: true });
+    g(repo, "worktree", "prune");
+    const again = await ensureWorktree({ repo, dataDir: data, runId: "20261108-000000-abcd", label: "a1b2", base });
+    expect(again.head).toBe(advanced);
+    expect(advanced).not.toBe(base);
   });
 });
 
@@ -152,6 +171,21 @@ describe("content-aware snapshots (§8.13)", () => {
     fs.symlinkSync(b.path, path.join(a.path, "peek"), linkType);
     const s = await takeSnapshot(a.path, snap);
     expect(escapingLinks(s)).toEqual([expect.objectContaining({ path: "peek", outside: true })]);
+  });
+  // Windows junctions are never recorded as mode-120000 entries, so there is no tracked link to detect there.
+  it.skipIf(process.platform === "win32")("detects a symlink committed after the inventory cache was used", async () => {
+    const { a, b, data } = await setup();
+    const cache = new SnapshotCache();
+    const first = await takeSnapshot(a.path, snap, cache);
+    expect(first.links).toEqual([]);
+    fs.symlinkSync(b.path, path.join(a.path, "peek"), linkType);
+    await commitAll(a.path, { emptyHooksDir: path.join(data, "empty-hooks"), message: "link" });
+    const s = await takeSnapshot(a.path, snap, cache);
+    expect(escapingLinks(s)).toEqual([expect.objectContaining({ path: "peek", outside: true })]);
+    // cached path, retargeted link: the target is re-resolved from the filesystem
+    fs.rmSync(path.join(a.path, "peek"), { recursive: true, force: true });
+    fs.symlinkSync(a.path, path.join(a.path, "peek"), linkType);
+    expect(escapingLinks(await takeSnapshot(a.path, snap, cache))).toEqual([]);
   });
 });
 

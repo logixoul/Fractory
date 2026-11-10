@@ -1,3 +1,4 @@
+import type { SnapshotCache } from "../git/snapshot.js";
 import type { Config } from "../schemas/config.js";
 import type { FileChange, RunEventInput } from "../schemas/run-events.js";
 import type { DoneEvent } from "../schemas/worker-events.js";
@@ -23,6 +24,8 @@ export interface StepContext {
   /** steps/<stepId>/ (inputs/, out/, artifacts/ exist). */
   readonly stepDir: string;
   readonly config: Config;
+  /** Shared by every step of one drive() call (symlink inventories of run worktrees). */
+  readonly snapshots?: SnapshotCache;
   state(): RunState;
   /** Runs one worker task, streaming its normalized events into the run log. */
   runWorker(workerId: string, task: WorkerRunOptions): Promise<DoneEvent>;

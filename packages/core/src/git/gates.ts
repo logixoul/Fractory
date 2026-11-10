@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { FileChange } from "../schemas/run-events.js";
 import { normCase, toPosix } from "../util/pathx.js";
-import { diffSnapshots, escapingLinks, takeSnapshot, type Snapshot, type SnapshotOptions } from "./snapshot.js";
+import { diffSnapshots, escapingLinks, takeSnapshot, type Snapshot, type SnapshotCache, type SnapshotOptions } from "./snapshot.js";
 
 /**
  * Per-step gates (§8.2, §8.4, §8.14, §8.19). Before a step: snapshot the main repo and every
@@ -39,11 +39,11 @@ export interface GateVerdict {
   inputsChanged: FileChange[];
 }
 
-export async function takeBaseline(t: GateTargets, o: SnapshotOptions, inputsDir?: string): Promise<GateBaseline> {
+export async function takeBaseline(t: GateTargets, o: SnapshotOptions, inputsDir?: string, cache?: SnapshotCache): Promise<GateBaseline> {
   const worktrees: Record<string, Snapshot> = {};
   const [main, ...wts] = await Promise.all([
     takeSnapshot(t.mainRepo, o),
-    ...Object.values(t.worktrees).map((p) => takeSnapshot(p, o)),
+    ...Object.values(t.worktrees).map((p) => takeSnapshot(p, o, cache)),
   ]);
   Object.keys(t.worktrees).forEach((label, i) => (worktrees[label] = wts[i]!));
   return { main: main!, worktrees, ...(inputsDir ? { inputs: hashInputs(inputsDir) } : {}) };
@@ -65,8 +65,9 @@ export async function evaluateGates(
   o: SnapshotOptions,
   policy: GatePolicy,
   inputsDir?: string,
+  cache?: SnapshotCache,
 ): Promise<GateVerdict> {
-  const after = await takeBaseline(t, o, inputsDir);
+  const after = await takeBaseline(t, o, inputsDir, cache);
   const verdict: GateVerdict = { attention: diffSnapshots(before.main, after.main), violations: {}, allowed: [], inputsChanged: [] };
   for (const label of Object.keys(t.worktrees)) {
     const changes = diffSnapshots(before.worktrees[label]!, after.worktrees[label]!);

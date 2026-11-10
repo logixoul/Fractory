@@ -28,7 +28,7 @@ function repo(): string {
   return r;
 }
 
-type Behaviour = { quota?: boolean; slow?: boolean };
+type Behaviour = { quota?: boolean; gate?: Promise<unknown> };
 function fakeWorkers(b: Behaviour = {}) {
   return (config: Config) =>
     Object.fromEntries(
@@ -48,7 +48,7 @@ function fakeWorkers(b: Behaviour = {}) {
           if (b.quota && id === "opus") return { actions: fakeQuotaExhausted(Date.now() + 3600_000) };
           if (/independently implementing|approved these items/.test(t.prompt))
             return { actions: [{ writeFile: { path: "math.js", content: `export const div = (a, b) => a / b; // ${id}\n` } }], finalText: "done" };
-          return { actions: b.slow ? [{ delayMs: 300 }] : [], finalText: "plan math.js:1 math.js:2 math.js:3" };
+          return { actions: b.gate ? [{ until: b.gate }] : [], finalText: "plan math.js:1 math.js:2 math.js:3" };
         }),
       ]),
     );
@@ -274,9 +274,14 @@ describe("daemon GUI serving", () => {
 
 describe("daemon API", () => {
   it("starts a consensus run; SSE replays from 0, then reconnect resumes after Last-Event-ID", async () => {
-    const d = await daemon({ slow: true });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    cleanups.push(release);
+    const d = await daemon({ gate });
     const runId = await startRun(d, "consensus");
+    // Workers stay blocked until the stream has been read while the run is still live.
     const first = await sse(d, `/api/runs/${runId}/events/stream`, {}, 5);
+    release();
     expect(first.ids).toEqual([1, 2, 3, 4, 5]);
     expect(first.types[0]).toBe("run_created");
     const rest = await sse(d, `/api/runs/${runId}/events/stream`, { "last-event-id": "5" });

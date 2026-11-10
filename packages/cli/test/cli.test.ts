@@ -35,7 +35,15 @@ const verdict = {
   unresolved: [],
 };
 
-function fakeWorkers(opts: { hangPropose?: boolean } = {}) {
+const waitFor = async (cond: () => boolean, timeoutMs: number) => {
+  const t0 = Date.now();
+  while (!cond()) {
+    if (Date.now() - t0 > timeoutMs) throw new Error("waitFor timed out");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+};
+
+function fakeWorkers(opts: { hangPropose?: boolean; onHang?: () => void } = {}) {
   return (config: Config) => {
     const mk = (id: string) =>
       new FakeWorker(id, (task: WorkerTask) => {
@@ -47,7 +55,10 @@ function fakeWorkers(opts: { hangPropose?: boolean } = {}) {
         if (out.endsWith("decision.json")) return { structured: verdict };
         if (out.endsWith("revise.json")) return { structured: { noChanges: true, proposal: "", changeSummary: "ok" } };
         if (/Critique it/.test(task.prompt)) return { finalText: "critique" };
-        if (opts.hangPropose) return { actions: [{ hang: true }] };
+        if (opts.hangPropose) {
+          opts.onHang?.();
+          return { actions: [{ hang: true }] };
+        }
         return { finalText: "plan: math.js:1 math.js:2 math.js:3" };
       });
     return Object.fromEntries(Object.keys(config.workers).map((id) => [id, mk(id)]));
@@ -138,9 +149,12 @@ describe("fractory CLI", () => {
     const prompt = path.join(tmp(), "p.md");
     fs.writeFileSync(prompt, "x\n");
     const ac = new AbortController();
-    const t = io({ workers: fakeWorkers({ hangPropose: true }), signal: ac.signal });
-    setTimeout(() => ac.abort(), 1500);
-    expect(await runCli(["consensus", "--repo", r, "--prompt", prompt], t.io)).toBe(EXIT.failed);
+    let hanging = false;
+    const t = io({ workers: fakeWorkers({ hangPropose: true, onHang: () => (hanging = true) }), signal: ac.signal });
+    const finished = runCli(["consensus", "--repo", r, "--prompt", prompt], t.io);
+    await waitFor(() => hanging, 30_000);
+    ac.abort();
+    expect(await finished).toBe(EXIT.failed);
     const runId = /run (\S+) \(consensus\)/.exec(t.out.join(""))![1]!;
     const s = io({ env: t.io.env });
     await runCli(["show", runId, "--json"], s.io);

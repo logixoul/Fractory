@@ -8,6 +8,8 @@ export type FakeAction =
   | { delayMs: number }
   /** Waits until aborted or timed out. */
   | { hang: true }
+  /** Waits until the promise settles (test latch), or until aborted or timed out. */
+  | { until: Promise<unknown> }
   /** Path relative to the task cwd (or absolute). */
   | { writeFile: { path: string; content: string } }
   | { removeFile: string }
@@ -90,8 +92,8 @@ export class FakeWorker implements Worker {
       if ("emit" in a) {
         yield a.emit;
         if (a.emit.type === "error") return;
-      } else if ("delayMs" in a || "hang" in a) {
-        const r = await wait("hang" in a ? Infinity : a.delayMs, task.signal, deadline);
+      } else if ("delayMs" in a || "hang" in a || "until" in a) {
+        const r = await wait("hang" in a || "until" in a ? Infinity : a.delayMs, task.signal, deadline, "until" in a ? a.until : undefined);
         if (r === "timeout") {
           yield { type: "error", kind: "timeout", message: `timed out after ${task.timeoutMs}ms` };
           return;
@@ -123,21 +125,24 @@ export class FakeWorker implements Worker {
   }
 }
 
-function wait(ms: number, signal: AbortSignal, deadline: number): Promise<"ok" | "timeout" | "aborted"> {
+function wait(ms: number, signal: AbortSignal, deadline: number, until?: Promise<unknown>): Promise<"ok" | "timeout" | "aborted"> {
   return new Promise((resolve) => {
     if (signal.aborted) return resolve("aborted");
     const untilDeadline = deadline - Date.now();
     const timedOut = untilDeadline <= ms;
     const delay = Math.max(0, Math.min(ms, untilDeadline));
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve(timedOut ? "timeout" : "ok");
-    }, delay);
-    const onAbort = () => {
+    const finish = (r: "ok" | "timeout" | "aborted") => {
       clearTimeout(timer);
-      resolve("aborted");
+      signal.removeEventListener("abort", onAbort);
+      resolve(r);
     };
+    const timer = setTimeout(() => finish(timedOut ? "timeout" : "ok"), delay);
+    const onAbort = () => finish("aborted");
     signal.addEventListener("abort", onAbort, { once: true });
+    void until?.then(
+      () => finish("ok"),
+      () => finish("ok"),
+    );
   });
 }
 

@@ -61,11 +61,21 @@ export async function ensureWorktree(o: { repo: string; dataDir: string; runId: 
   }
   if (fs.existsSync(wt) && fs.readdirSync(wt).length > 0) throw new Error(`${wt} exists and is not a worktree of ${o.repo}`);
   fs.mkdirSync(path.dirname(wt), { recursive: true });
-  await git(["worktree", "prune"], { cwd: o.repo });
   const hasBranch = (await git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: o.repo, allowFail: true })).code === 0;
   const args = hasBranch ? ["worktree", "add", wt, branch] : ["worktree", "add", "-b", branch, wt, o.base];
-  await git(args, { cwd: o.repo });
-  return { path: wt, branch, head: await revParse(wt) };
+  try {
+    await git(args, { cwd: o.repo });
+  } catch (e) {
+    // A stale registration (directory deleted behind git's back) is recovered by one prune + retry.
+    await git(["worktree", "prune"], { cwd: o.repo });
+    try {
+      await git(args, { cwd: o.repo });
+    } catch {
+      throw e;
+    }
+  }
+  // Only a freshly created branch is known to sit at `base`; an existing branch may have advanced.
+  return { path: wt, branch, head: hasBranch ? await revParse(wt) : o.base };
 }
 
 function realOrSelf(p: string): string {

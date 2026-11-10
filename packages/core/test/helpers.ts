@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach } from "vitest";
+import { afterEach, onTestFinished } from "vitest";
 import { deepMerge, parseConfig } from "../src/config/load.js";
 import { DEFAULT_CONFIG_INPUT, type Config } from "../src/schemas/config.js";
 import type { RunState } from "../src/state/reducer.js";
@@ -9,16 +9,44 @@ import type { RunHandle, RunStore } from "../src/store/run-store.js";
 import type { WorkStep, WorkflowDef } from "../src/engine/types.js";
 import { newLabels } from "../src/util/random.js";
 
-const dirs: string[] = [];
+const orphanDirs: string[] = [];
 
+function removeDir(d: string): void {
+  fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
+/**
+ * Temp directory owned by the running test: it is removed when that test finishes, and never by
+ * another test's cleanup. Outside a test (e.g. a hook) it falls back to afterEach cleanup.
+ * Must be called synchronously from the test body; after an `await`, use `tmpDirFor` instead.
+ */
 export function tmpDir(prefix = "fractory-test-"): string {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  dirs.push(d);
+  try {
+    onTestFinished(() => removeDir(d));
+  } catch {
+    orphanDirs.push(d);
+  }
   return d;
 }
 
+/** Scoped allocator for ownership that outlives an `await`: `release()` removes only its own directories. */
+export function tmpDirScope(): { dir(prefix?: string): string; release(): void } {
+  const owned: string[] = [];
+  return {
+    dir(prefix = "fractory-test-") {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+      owned.push(d);
+      return d;
+    },
+    release() {
+      for (const d of owned.splice(0)) removeDir(d);
+    },
+  };
+}
+
 afterEach(() => {
-  for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  for (const d of orphanDirs.splice(0)) removeDir(d);
 });
 
 export function testConfig(overrides: unknown = {}): Config {
