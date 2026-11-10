@@ -325,8 +325,10 @@ export const DEFAULT_CONFIG_INPUT = {
     "baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017": { input: 0.3, output: 1.2, cacheRead: 0.007, source: BASETEN_PRICES, checkedAt: "2026-11-10" },
     "baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast": { input: 0.6, output: 2.4, cacheRead: 0.014, source: BASETEN_PRICES, checkedAt: "2026-11-09" },
     "baseten/zai-org/GLM-5.3-Flash": { input: 0.15, output: 0.5, cacheRead: 0.03, source: BASETEN_PRICES, checkedAt: "2026-11-09" },
-    // Prompts up to 272k tokens (the model's context window in Pi's catalog). No cacheWrite: OpenAI caching is automatic.
-    "openai/gpt-6.1-sol": { input: 2, output: 10, cacheRead: 0.1, source: OPENAI_PRICES, checkedAt: "2026-11-09" },
+    // Prompts up to 272k tokens (the model's context window in Pi's catalog). Standard service tier:
+    // OpenAI's priority/"fast" tier bills 2x (Pi applies it to its vendor cost, fractory does not).
+    // Pi reports cache writes for this model (explicit prompt-cache mode); unpriced, every record's cost was unknown.
+    "openai/gpt-6.1-sol": { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5, source: OPENAI_PRICES, checkedAt: "2026-11-10" },
     // Claude: used only for extra usage (billing "overage"); subscription usage costs nothing here.
     // Claude Code also calls Haiku for small internal tasks, which count as extra usage too.
     "anthropic/claude-opus-5": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 10, source: ANTHROPIC_PRICES, checkedAt: "2026-11-10" },

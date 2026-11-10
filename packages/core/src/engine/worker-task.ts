@@ -102,6 +102,7 @@ export async function runWorkerTask(args: {
             ...("warning" in cost && cost.warning !== undefined ? { warning: cost.warning } : {}),
             billing: subscription ? "subscription" : claude ? "overage" : "metered",
           });
+          if (!claude) checkVendorCost(run, stepId, workerId, priceKey, cost.costUsd, ev.vendorCostUsd);
           break;
         }
         case "rate_limit": {
@@ -151,6 +152,34 @@ export async function runWorkerTask(args: {
   }
   if (!done) throw new StepFailure("error", `worker ${workerId} ended without a done event`);
   return done;
+}
+
+/** Relative gap between computed and vendor cost above which a price is flagged. */
+export const COST_MISMATCH_TOLERANCE = 0.05;
+
+/**
+ * Cross-checks the orchestrator's cost against the vendor's informational figure (metered
+ * workers only: Claude's vendor cost is API-equivalent, and extra usage is priced with a known
+ * cache-write upper bound). Never changes the recorded cost (§8.1); it raises a run warning,
+ * once per run and model, so an incomplete or stale price, or a vendor surcharge such as a
+ * priority service tier, is visible instead of silently wrong.
+ */
+function checkVendorCost(run: RunHandle, stepId: string, workerId: string, priceKey: string, costUsd: number | null, vendorCostUsd: number | undefined): void {
+  if (vendorCostUsd === undefined || vendorCostUsd <= 0) return;
+  let code: string;
+  let message: string;
+  if (costUsd === null) {
+    code = "cost_unpriced";
+    message = `${priceKey}: no complete price configured, so ${workerId}'s cost is unknown (the vendor reports $${vendorCostUsd.toFixed(4)} for this call). Add the missing rates to \`prices\`.`;
+  } else {
+    const gap = Math.abs(costUsd - vendorCostUsd);
+    if (gap <= 0.0001 || gap / Math.max(costUsd, vendorCostUsd) <= COST_MISMATCH_TOLERANCE) return;
+    code = "cost_mismatch";
+    const ratio = costUsd > 0 ? ` (${(vendorCostUsd / costUsd).toFixed(2)}x)` : "";
+    message = `${priceKey}: computed $${costUsd.toFixed(4)} but the vendor reports $${vendorCostUsd.toFixed(4)}${ratio} for this call. The configured price may be stale, or the provider applies a surcharge (e.g. a priority service tier).`;
+  }
+  if (run.state().warnings.some((w) => w.code === code && w.message.startsWith(`${priceKey}:`))) return;
+  run.append({ type: "warning", code, message, stepId });
 }
 
 function observeQuota(

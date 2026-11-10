@@ -405,6 +405,40 @@ describe("engine: workflow features", () => {
     expect(usage.find((u) => u.priceKey === "baseten/some/unpriced-model")).toMatchObject({ costUsd: null, warning: expect.stringContaining("no price") });
   });
 
+  it("warns once per model when the computed cost disagrees with the vendor's or can't be computed", async () => {
+    const usage = (model: string, vendorCostUsd: number) => ({
+      emit: { type: "usage" as const, provider: "baseten", model, tokens: { input: 1_000_000, output: 0 }, vendorCostUsd },
+    });
+    const { run, deps } = setup({
+      deepseek: [
+        {
+          match: "propose",
+          finalText: "D",
+          actions: [
+            usage("deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast", 0.6), // matches the configured $0.6/1M
+            usage("deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast", 1.2), // 2x: priority-tier-like surcharge
+            usage("deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast", 1.2), // same model again: no second warning
+            usage("some/unpriced-model", 0.5),
+          ],
+        },
+      ],
+      opus: [
+        {
+          match: "propose",
+          finalText: "O",
+          // Claude's vendor cost is API-equivalent: never compared
+          actions: [{ emit: { type: "usage", provider: "anthropic", model: "claude-opus-5", tokens: { input: 10, output: 20 }, vendorCostUsd: 99 } }],
+        },
+      ],
+    });
+    const st = await drive(run, demoWorkflow(), deps);
+    expect(st.warnings.map((w) => w.code).sort()).toEqual(["cost_mismatch", "cost_unpriced"]);
+    expect(st.warnings.find((w) => w.code === "cost_mismatch")?.message).toMatch(/^baseten\/deepseek-ai\/DeepSeek-V4\.1-Flash-1017-Fast: computed \$0\.6000 but the vendor reports \$1\.2000 \(2\.00x\)/);
+    expect(st.warnings.find((w) => w.code === "cost_unpriced")?.message).toMatch(/^baseten\/some\/unpriced-model: /);
+    // the recorded cost is still the orchestrator's own
+    expect(st.costs.deepseek?.costUsd).toBeCloseTo(1.8, 10);
+  });
+
   it("coalesces streamed text deltas without losing content", async () => {
     const deltas = Array.from({ length: 200 }, (_, i) => ({ emit: { type: "text" as const, text: `t${i} ` } }));
     const { run, deps } = setup({ deepseek: [{ match: "propose", finalText: "D", actions: deltas }] });

@@ -34,7 +34,7 @@ describe("loadConfig", () => {
     expect(config.roles).toEqual({ contestants: ["opus", "deepseek"], judge: "glm", implementer: "opus", reviewer: "gpt" });
     // review workflow: the reviewer is OpenAI's gpt-6.1-sol via Pi (a different family than opus)
     expect(config.workers.gpt).toMatchObject({ kind: "pi", provider: "openai", model: "gpt-6.1-sol", thinking: "medium", passEnv: ["OPENAI_API_KEY"] });
-    expect(config.prices["openai/gpt-6.1-sol"]).toMatchObject({ input: 2, output: 10, cacheRead: 0.1 });
+    expect(config.prices["openai/gpt-6.1-sol"]).toMatchObject({ input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 });
     expect(config.review).toEqual({ maxRounds: 1, maxFixIterations: 2, maxFindings: 30 });
     expect(config.workers.glm).toMatchObject({ kind: "pi", provider: "baseten", model: "zai-org/GLM-5.3-Flash", thinking: "high", passEnv: ["BASETEN_API_KEY"] });
     expect(config.prices["baseten/zai-org/GLM-5.3-Flash"]).toMatchObject({ input: 0.15, output: 0.5, cacheRead: 0.03 });
