@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { StepTiming } from "./timing.js";
-import { QuotaWindow, UsageTokens, WorkerEvent } from "./worker-events.js";
+import { Overage, QuotaWindow, UsageTokens, WorkerEvent } from "./worker-events.js";
 
 export const Workflow = z.enum(["consensus", "duel", "review", "test"]);
 export type Workflow = z.infer<typeof Workflow>;
@@ -86,8 +86,11 @@ export const RunEvent = z.discriminatedUnion("type", [
     costUsd: z.number().nullable(),
     vendorCostUsd: z.number().optional(),
     warning: z.string().optional(),
-    /** "subscription": no metered cost (Claude Pro); vendor cost is API-equivalent only. */
-    billing: z.enum(["metered", "subscription"]).optional(),
+    /**
+     * "subscription": no metered cost (Claude Pro); vendor cost is API-equivalent only.
+     * "overage": Claude extra usage, paid at API rates; costUsd from the price table.
+     */
+    billing: z.enum(["metered", "subscription", "overage"]).optional(),
   }),
   z.object({ ...base, type: z.literal("step_retrying"), ...stepRef, reason: z.string(), delayMs: z.number().int().nonnegative() }),
   /** fractory resume --retry-failed: the failed step reruns from its checkpoint. */
@@ -101,6 +104,7 @@ export const RunEvent = z.discriminatedUnion("type", [
     status: z.string(),
     resetsAt: z.number().optional(),
     windows: z.record(z.string(), QuotaWindow),
+    overage: Overage.optional(),
   }),
   z.object({
     ...base,

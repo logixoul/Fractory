@@ -259,7 +259,7 @@ const FIRST_PARTY_PROVIDERS: Record<string, string> = {
   minimax: "minimax",
 };
 
-/** Model-id patterns for multi-vendor providers (Baseten, Together, OpenRouter, ...). First match wins. */
+/** Model-id patterns for multi-vendor providers (Lithos, Baseten, Together, OpenRouter, ...). First match wins. */
 const MODEL_FAMILIES: readonly [RegExp, string][] = [
   [/claude|anthropic/i, "anthropic"],
   [/\bgpt-|openai|(^|\/)o\d/i, "openai"],
@@ -288,18 +288,29 @@ export type ConfigInput = z.input<typeof Config>;
 
 /** Baseten Model APIs prices, from `GET https://inference.baseten.co/v1/models` (its `pricing` field). */
 const BASETEN_PRICES = "https://inference.baseten.co/v1/models (pricing field) ; https://www.baseten.co/pricing";
+/** LithosAI's public pricing page (DeepSeek V4.1 Flash, Ultra tier); billing per docs.lithosai.com/billing. */
+const LITHOS_PRICES = "https://www.lithosai.com/pricing (Ultra tier, early-access price) ; https://docs.lithosai.com/billing";
 /** Not checked on openai.com: Pi 1.5.0's catalog and third-party trackers agree (docs/interfaces.md §2a). */
 const OPENAI_PRICES =
   "Pi 1.5.0 catalog (pi-ai providers/data/openai.json); pricepertoken.com, getdeploying.com. Unverified: developers.openai.com/api/docs/pricing";
+
+/**
+ * Anthropic API rates: what Claude extra usage (beyond the Pro windows) is billed at. Checked by
+ * reproducing Claude Code's `total_cost_usd` per token class to the cent (run 20261110-001205-0e94).
+ * Not checked on anthropic.com/pricing. Usage does not split 5-minute and 1-hour cache writes;
+ * cacheWrite is the 1-hour rate (2× input), an upper bound (5-minute writes are 1.25× input).
+ */
+const ANTHROPIC_PRICES = "Claude Code total_cost_usd (reproduced per token class). Unverified: https://www.anthropic.com/pricing";
 
 /** Built-in defaults; global and per-repo config files are deep-merged on top. */
 export const DEFAULT_CONFIG_INPUT = {
   workers: {
     opus: { kind: "claude", model: "opus", effort: "medium" },
-    // Baseten's "Fast" variant: same weights, dedicated capacity for higher throughput, 2× price.
-    deepseek: { kind: "pi", provider: "baseten", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast", thinking: "medium" },
-    // Consensus contestant: the standard (non-Fast) build, half the price, shared capacity.
-    "deepseek-std": { kind: "pi", provider: "baseten", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017", thinking: "medium" },
+    // LithosAI's "Ultra" tier (moved off Baseten after 429s). Custom Pi provider: PI_MODELS in workers/pi.ts.
+    // "high", explicitly: Lithos runs medium as high (levels off/low/high/max).
+    deepseek: { kind: "pi", provider: "lithos", model: "deepseek-ai/DeepSeek-V4.1-Flash-ultra", thinking: "high", passEnv: ["LITHOS_API_KEY"] },
+    // Consensus contestant; same model as `deepseek` since the Lithos switch (kept as its own id for configs that name it).
+    "deepseek-std": { kind: "pi", provider: "lithos", model: "deepseek-ai/DeepSeek-V4.1-Flash-ultra", thinking: "high", passEnv: ["LITHOS_API_KEY"] },
     // Judge from a third model family (not a contestant), to avoid self-preference; Flash for cost.
     // "high", explicitly: GLM-5.3 Flash on Baseten has low/high/max only (Pi would map medium to high).
     glm: { kind: "pi", provider: "baseten", model: "zai-org/GLM-5.3-Flash", thinking: "high" },
@@ -308,12 +319,18 @@ export const DEFAULT_CONFIG_INPUT = {
   },
   roles: { contestants: ["opus", "deepseek"], judge: "glm", implementer: "opus", reviewer: "gpt" },
   prices: {
+    // LithosAI pricing page, "Ultra" tier: an early-access discounted price (may change). Cached input is a subset of input.
+    "lithos/deepseek-ai/DeepSeek-V4.1-Flash-ultra": { input: 0.35, output: 1.4, cacheRead: 0.007, source: LITHOS_PRICES, checkedAt: "2026-11-10" },
     // Pi 1.5.0's Baseten catalog (checked 2026-11-10): half the Fast price.
     "baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017": { input: 0.3, output: 1.2, cacheRead: 0.007, source: BASETEN_PRICES, checkedAt: "2026-11-10" },
     "baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast": { input: 0.6, output: 2.4, cacheRead: 0.014, source: BASETEN_PRICES, checkedAt: "2026-11-09" },
     "baseten/zai-org/GLM-5.3-Flash": { input: 0.15, output: 0.5, cacheRead: 0.03, source: BASETEN_PRICES, checkedAt: "2026-11-09" },
     // Prompts up to 272k tokens (the model's context window in Pi's catalog). No cacheWrite: OpenAI caching is automatic.
     "openai/gpt-6.1-sol": { input: 2, output: 10, cacheRead: 0.1, source: OPENAI_PRICES, checkedAt: "2026-11-09" },
+    // Claude: used only for extra usage (billing "overage"); subscription usage costs nothing here.
+    // Claude Code also calls Haiku for small internal tasks, which count as extra usage too.
+    "anthropic/claude-opus-5": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 10, source: ANTHROPIC_PRICES, checkedAt: "2026-11-10" },
+    "anthropic/claude-haiku-4-5-20251001": { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 2, source: ANTHROPIC_PRICES, checkedAt: "2026-11-10" },
   },
 } satisfies ConfigInput;
 
@@ -327,6 +344,8 @@ export const PI_THINKING_LEVELS: readonly { provider: string; model: RegExp; lev
   { provider: "together", model: /DeepSeek-V4(\.1)?-Flash/i, levels: ["off", "high"], otherwise: "high" },
   { provider: "baseten", model: /^zai-org\/GLM-5\.3-Flash$/i, levels: ["low", "high", "max"], otherwise: "the next supported level (medium → high)" },
   { provider: "baseten", model: /^deepseek-ai\/DeepSeek-V4\.1-Flash/i, levels: ["off", "low", "medium", "high", "max"], otherwise: "the next supported level" },
+  // Lithos runs minimal/low as low, medium/high/xhigh as high (docs.lithosai.com, DeepSeek V4.1 Flash page); PI_MODELS maps them.
+  { provider: "lithos", model: /^deepseek-ai\/DeepSeek-V4\.1-Flash/i, levels: ["off", "low", "high", "max"], otherwise: "the next supported level (medium → high)" },
   { provider: "openai", model: /^gpt-6\.1-(sol|terra)$/i, levels: ["low", "medium", "high", "xhigh", "max"], otherwise: "no reasoning setting (off/minimal are unmapped)" },
 ];
 

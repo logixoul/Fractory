@@ -1,4 +1,4 @@
-import { WorkerEvent, isQuotaExhaustedStatus, type DoneEvent } from "../schemas/worker-events.js";
+import { WorkerEvent, isOnExtraUsage, isQuotaExhaustedStatus, type DoneEvent } from "../schemas/worker-events.js";
 import type { RunHandle } from "../store/run-store.js";
 import { computeCost } from "./cost.js";
 import { AbortedError, QuotaExhaustedError, StepFailure } from "./errors.js";
@@ -62,6 +62,9 @@ export async function runWorkerTask(args: {
   let lastResetsAt: number | undefined;
   let requestedReasoning: string | undefined;
   let exhausted = false;
+  // Claude extra usage seen during this invocation. Usage arrives once, at the end, so the
+  // whole invocation is billed as overage if any part of it was (an upper bound).
+  let onExtraUsage = false;
 
   const { timeoutMs, ...rest } = options;
   const task = { ...rest, timeoutMs: timeoutMs ?? cfg.timeouts.workerMs, signal };
@@ -83,7 +86,9 @@ export async function runWorkerTask(args: {
         case "usage": {
           const priceKey = `${ev.provider}/${ev.model}`;
           // Claude runs on the Pro subscription: not metered; its vendor cost is API-equivalent only.
-          const subscription = cfg.workers[workerId]?.kind === "claude";
+          // Beyond the subscription windows it runs on extra usage, paid at API rates.
+          const claude = cfg.workers[workerId]?.kind === "claude";
+          const subscription = claude && !onExtraUsage;
           const cost = subscription ? { costUsd: 0 } : computeCost(cfg.prices[priceKey], ev.tokens);
           run.append({
             type: "usage_recorded",
@@ -95,13 +100,15 @@ export async function runWorkerTask(args: {
             costUsd: cost.costUsd,
             ...(ev.vendorCostUsd !== undefined ? { vendorCostUsd: ev.vendorCostUsd } : {}),
             ...("warning" in cost && cost.warning !== undefined ? { warning: cost.warning } : {}),
-            billing: subscription ? "subscription" : "metered",
+            billing: subscription ? "subscription" : claude ? "overage" : "metered",
           });
           break;
         }
         case "rate_limit": {
           if (ev.resetsAt !== undefined) lastResetsAt = ev.resetsAt;
-          if (isQuotaExhaustedStatus(ev.status)) exhausted = true;
+          // Each event is the current state: extra usage being allowed again clears an earlier exhaustion.
+          exhausted = isQuotaExhaustedStatus(ev.status, ev.overage);
+          if (isOnExtraUsage(ev.status, ev.overage) || ev.overage?.inUse) onExtraUsage = true;
           observeQuota(run, workerId, ev, deps, now());
           break;
         }
@@ -159,6 +166,7 @@ function observeQuota(
     status: ev.status,
     windows: ev.windows,
     ...(ev.resetsAt !== undefined ? { resetsAt: ev.resetsAt } : {}),
+    ...(ev.overage !== undefined ? { overage: ev.overage } : {}),
   });
   if (deps.quotaFile) {
     updateQuotaBook(deps.quotaFile, workerId, {
@@ -166,6 +174,7 @@ function observeQuota(
       windows: ev.windows,
       observedAt: now,
       ...(ev.resetsAt !== undefined ? { resetsAt: ev.resetsAt } : {}),
+      ...(ev.overage !== undefined ? { overage: ev.overage } : {}),
     });
   }
   const q = deps.config.quota;

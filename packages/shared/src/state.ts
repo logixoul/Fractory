@@ -1,7 +1,7 @@
 // Derived run state (state.json) shapes, shared by core (reducer) and the GUI.
 import type { StepFailureKind, Workflow } from "./run-events.js";
 import type { StepTiming } from "./timing.js";
-import type { UsageTokens } from "./worker-events.js";
+import type { Overage, UsageTokens } from "./worker-events.js";
 
 export type RunStatus =
   | "running"
@@ -40,14 +40,18 @@ export interface WorkerTotals {
   /** true when at least one usage record had no computable cost */
   costUnknown: boolean;
   vendorCostUsd: number;
-  /** "subscription": not metered (Claude Pro); vendorCostUsd is API-equivalent only. */
-  billing?: "metered" | "subscription";
+  /**
+   * "subscription": not metered (Claude Pro); vendorCostUsd is API-equivalent only.
+   * "overage": a Claude worker with at least one extra-usage record; costUsd is that extra usage.
+   */
+  billing?: "metered" | "subscription" | "overage";
 }
 
 export interface QuotaState {
   status: string;
   resetsAt?: number;
   windows: Record<string, { utilization: number; resetsAt?: number }>;
+  overage?: Overage;
   observedAt: string;
 }
 

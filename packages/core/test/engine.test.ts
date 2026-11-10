@@ -119,6 +119,62 @@ describe("engine: quota", () => {
     expect(types(run)).toContain("resumed");
   });
 
+  it("keeps working on extra usage: rejected windows with overage allowed bill as overage at API rates", async () => {
+    const resetsAt = Date.now() + 3_600_000;
+    const onExtra = { type: "rate_limit" as const, status: "rejected", resetsAt, windows: { five_hour: { utilization: 1, resetsAt } }, overage: { status: "allowed", inUse: true } };
+    const { run, deps } = setup({
+      quotaFile: true,
+      opus: [
+        {
+          match: "propose",
+          finalText: "plan O",
+          actions: [{ emit: onExtra }, { emit: { type: "usage", provider: "anthropic", model: "claude-opus-5", tokens: { input: 10, output: 20 } } }],
+        },
+      ],
+    });
+    const st = await drive(run, demoWorkflow(), deps);
+    expect(st.status).toBe("awaiting_approval");
+    expect(st.quota.opus).toMatchObject({ status: "rejected", overage: { status: "allowed", inUse: true } });
+    const usage = run.events().find((e) => e.type === "usage_recorded" && e.workerId === "opus");
+    expect(usage).toMatchObject({ billing: "overage", costUsd: expect.closeTo((10 * 5 + 20 * 25) / 1e6, 12) });
+    expect(st.costs.opus).toMatchObject({ billing: "overage", costUnknown: false });
+  });
+
+  it("on extra usage, a non-quota error fails the step instead of pausing for quota", async () => {
+    const resetsAt = Date.now() + 3_600_000;
+    const { run, deps } = setup({
+      opus: [
+        {
+          match: "propose",
+          actions: [
+            { emit: { type: "rate_limit", status: "rejected", resetsAt, windows: {}, overage: { status: "allowed", inUse: true } } },
+            { emit: { type: "error", kind: "process", message: "claude exited (code 1)" } },
+          ],
+        },
+      ],
+    });
+    const st = await drive(run, demoWorkflow(), deps);
+    expect(st.status).not.toBe("paused_quota");
+    expect(st.steps[`propose.${labelOf(st, "opus")}`]?.status).toBe("failed");
+  });
+
+  it("still pauses when extra usage is rejected too", async () => {
+    const resetsAt = Date.now() + 3_600_000;
+    const { run, deps } = setup({
+      opus: [
+        {
+          match: "propose",
+          actions: [
+            { emit: { type: "rate_limit", status: "rejected", resetsAt, windows: {}, overage: { status: "rejected", inUse: false, disabledReason: "org_level_disabled_until" } } },
+            { emit: { type: "error", kind: "process", message: "claude exited (code 1)" } },
+          ],
+        },
+      ],
+    });
+    const st = await drive(run, demoWorkflow(), deps);
+    expect(st.status).toBe("paused_quota");
+  });
+
   it("resumes without force once the reset time has passed", async () => {
     const resetsAt = Date.now() + 3_600_000;
     const { run, deps } = setup({

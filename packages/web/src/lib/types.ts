@@ -29,6 +29,7 @@ export interface QuotaEntry {
   status: string;
   resetsAt?: number;
   windows: Record<string, { utilization: number; resetsAt?: number }>;
+  overage?: { status: string; inUse: boolean; resetsAt?: number; disabledReason?: string };
   observedAt: number;
 }
 

@@ -24,7 +24,8 @@ export const PI_TOOLS = {
 } as const;
 
 /**
- * Pi's own retries for provider rate limits (Baseten Basic tier: 15-120 RPM) and 5xx (§2).
+ * Pi's own retries for provider rate limits (Baseten Basic tier: 15-120 RPM; LithosAI per-model
+ * request/token budgets, with Retry-After) and 5xx (§2).
  * Two levels, both bounded:
  *  - provider (request) level: retries a failed HTTP request with 429/408/409/5xx, honoring
  *    Retry-After / retry-after-ms up to maxRetryDelayMs, otherwise exponential 0.5-8 s.
@@ -45,10 +46,51 @@ export const PI_AGENT_SETTINGS = {
   },
 };
 
-export function ensurePiAgentDir(dir: string): void {
-  fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, "settings.json");
-  const want = JSON.stringify(PI_AGENT_SETTINGS, null, 2) + "\n";
+/**
+ * Providers Pi doesn't ship, written to the fractory-owned agent dir's models.json (§2 "LithosAI").
+ * LithosAI: OpenAI-compatible chat completions; rejects undeclared request fields with 400, so
+ * every optional OpenAI field Pi could send is turned off. The key comes from the worker env
+ * (`$LITHOS_API_KEY` is Pi's env interpolation; the value is never written here).
+ * Thinking: Lithos accepts none/minimal/low/medium/high/xhigh/max but runs only off/low/high/max
+ * (medium → high), so the other levels are null and Pi clamps (and reports) them itself.
+ * The `cost` is Pi's informational vendor cost; fractory computes its own from `prices`.
+ */
+export const PI_MODELS = {
+  providers: {
+    lithos: {
+      name: "LithosAI",
+      baseUrl: "https://api.lithosai.cloud/v1",
+      api: "openai-completions",
+      apiKey: "$LITHOS_API_KEY",
+      authHeader: true,
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: true,
+        supportsUsageInStreaming: true,
+        maxTokensField: "max_tokens",
+        thinkingFormat: "openai",
+        sendSessionAffinityHeaders: false,
+        supportsLongCacheRetention: false,
+      },
+      models: [
+        {
+          id: "deepseek-ai/DeepSeek-V4.1-Flash-ultra",
+          name: "DeepSeek V4.1 Flash Ultra (LithosAI)",
+          reasoning: true,
+          input: ["text"],
+          contextWindow: 1_048_576,
+          // Lithos allows 393,216, but input + max_tokens must fit the context; same as the Baseten builds.
+          maxTokens: 262_144,
+          thinkingLevelMap: { off: "none", minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" },
+          cost: { input: 0.35, output: 1.4, cacheRead: 0.007, cacheWrite: 0 },
+        },
+      ],
+    },
+  },
+};
+
+function writeIfChanged(file: string, want: string): void {
   let have: string | undefined;
   try {
     have = fs.readFileSync(file, "utf8");
@@ -56,6 +98,12 @@ export function ensurePiAgentDir(dir: string): void {
     have = undefined;
   }
   if (have !== want) writeFileAtomicSync(file, want);
+}
+
+export function ensurePiAgentDir(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true });
+  writeIfChanged(path.join(dir, "settings.json"), JSON.stringify(PI_AGENT_SETTINGS, null, 2) + "\n");
+  writeIfChanged(path.join(dir, "models.json"), JSON.stringify(PI_MODELS, null, 2) + "\n");
 }
 
 export interface GuardAllowlist {
@@ -83,7 +131,7 @@ export function piArgs(cfg: Pick<PiCfg, "provider" | "model" | "thinking">, task
 export interface PiWorkerOptions {
   /** Base env (default process.env). Secret-looking vars are stripped, then `secretEnv` is added. */
   env?: NodeJS.ProcessEnv;
-  /** Values from envFile (e.g. BASETEN_API_KEY). */
+  /** Values from envFile (e.g. LITHOS_API_KEY, BASETEN_API_KEY). */
   secretEnv?: Record<string, string>;
   /** <dataDir>/pi-agent (PI_CODING_AGENT_DIR) and <dataDir>/pi-sessions. */
   agentDir: string;

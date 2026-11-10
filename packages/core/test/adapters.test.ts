@@ -98,6 +98,19 @@ describe("Claude stream parser (recorded fixtures)", () => {
     expect(p.fatal).toBe(true);
   });
 
+  it("parses extra-usage (overage) state from rate_limit_event", () => {
+    const p = new ClaudeStreamParser({ sessionId: "x", requestedModel: "opus", requestedReasoning: "high" });
+    const info = { status: "rejected", resetsAt: 1794273000, rateLimitType: "five_hour", unifiedWindows: { five_hour: { utilization: 1, resetsAt: 1794273000 } } };
+    // shapes observed in run 20261110-001205-0e94
+    expect(p.record({ type: "rate_limit_event", rate_limit_info: { ...info, overageStatus: "allowed", overageResetsAt: 1796083200, isUsingOverage: true, overageInUse: true } })).toEqual([
+      { type: "rate_limit", status: "rejected", resetsAt: 1794273000_000, windows: { five_hour: { utilization: 1, resetsAt: 1794273000_000 } }, overage: { status: "allowed", inUse: true, resetsAt: 1796083200_000 } },
+    ]);
+    expect(p.record({ type: "rate_limit_event", rate_limit_info: { ...info, overageStatus: "rejected", overageDisabledReason: "org_level_disabled_until", isUsingOverage: false } })[0]).toMatchObject({
+      overage: { status: "rejected", inUse: false, disabledReason: "org_level_disabled_until" },
+    });
+    expect(p.record({ type: "rate_limit_event", rate_limit_info: { status: "allowed_warning", isUsingOverage: false } })[0]).not.toHaveProperty("overage");
+  });
+
   it("classifies a usage-limit result as quota with the last reset time", () => {
     const p = new ClaudeStreamParser({ sessionId: "x", requestedModel: "opus", requestedReasoning: "high" });
     p.record({ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: 1800000000 } });
@@ -248,6 +261,10 @@ describe("adapters end to end with a fake CLI", () => {
     expect(JSON.parse(fs.readFileSync(path.join(data, "pi-agent", "settings.json"), "utf8"))).toEqual({
       retry: { enabled: true, maxRetries: 4, baseDelayMs: 2000, maxAgentDelayMs: 60000, provider: { maxRetries: 4, maxRetryDelayMs: 60000 } },
     });
+    // custom providers: the key is an env reference, never a value
+    const models = JSON.parse(fs.readFileSync(path.join(data, "pi-agent", "models.json"), "utf8"));
+    expect(models.providers.lithos).toMatchObject({ baseUrl: "https://api.lithosai.cloud/v1", api: "openai-completions", apiKey: "$LITHOS_API_KEY" });
+    expect(models.providers.lithos.models.map((m: { id: string }) => m.id)).toEqual(["deepseek-ai/DeepSeek-V4.1-Flash-ultra"]);
     expect(fs.readdirSync(stepDir).filter((f) => f.startsWith("pi-guard-ack"))).toEqual([]);
 
     const t0 = Date.now();

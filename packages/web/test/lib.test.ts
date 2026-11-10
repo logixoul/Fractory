@@ -64,6 +64,21 @@ describe("panes", () => {
     expect(panes.find((p) => p.key === "judge")!.steps[0]).toMatchObject({ status: "failed", detail: "exit_check: bad" });
   });
 
+  it("marks earlier attempts of a step superseded once a later attempt starts", () => {
+    seq = 0;
+    const events = [
+      ev({ type: "step_started", stepId: "judge", attempt: 1, workerId: "opus" }),
+      ev({ type: "step_failed", stepId: "judge", attempt: 1, kind: "quota", reason: "quota exhausted" }),
+      ev({ type: "step_started", stepId: "propose.a1b2", attempt: 1, workerId: "opus", label: "a1b2" }),
+    ];
+    let judge = buildPanes(events, labels).find((p) => p.key === "judge")!.steps;
+    expect(judge.map((s) => s.superseded)).toEqual([undefined]);
+    events.push(ev({ type: "step_started", stepId: "judge", attempt: 2, workerId: "opus" }));
+    judge = buildPanes(events, labels).find((p) => p.key === "judge")!.steps;
+    expect(judge.map((s) => [s.attempt, s.status, s.superseded])).toEqual([[1, "failed", true], [2, "running", undefined]]);
+    expect(buildPanes(events, labels).find((p) => p.key === "opus")!.steps[0]!.superseded).toBeUndefined();
+  });
+
   it("shows provider retries and step retries in the live view", () => {
     seq = 0;
     const s = { stepId: "propose.c3d4", attempt: 1 };

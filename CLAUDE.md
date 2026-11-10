@@ -1,6 +1,6 @@
 # fractory: rules for every session
 
-Local multi-model orchestrator: Opus (Claude Code, Pro subscription) and DeepSeek (Pi + Baseten; judge GLM-5.3 Flash) as bounded workers in deterministic workflows (consensus, duel). Full spec: `spec.md`. Verified CLI interfaces: `docs/interfaces.md`.
+Local multi-model orchestrator: Opus (Claude Code, Pro subscription) and DeepSeek (Pi + LithosAI; judge GLM-5.3 Flash on Baseten) as bounded workers in deterministic workflows (consensus, duel). Full spec: `spec.md`. Verified CLI interfaces: `docs/interfaces.md`.
 
 ## Hard architectural rules (do not deviate)
 1. **Deterministic control plane.** All workflow logic is explicit TypeScript state machines. No LLM ever decides control flow, phase transitions, or "is it done".

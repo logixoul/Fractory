@@ -27,6 +27,8 @@ export interface StepBlock {
   attempt: number;
   status: "running" | "completed" | "failed" | "abandoned";
   detail?: string;
+  /** A later attempt of the same step exists; the view collapses this one. */
+  superseded?: boolean;
   /** Recorded at the step's end (step_timing), or computed live while it runs. */
   timing?: StepTiming;
   items: PaneItem[];
@@ -69,6 +71,7 @@ export function buildPanes(events: readonly RunEvent[], labels: Record<string, s
     if (ev.type === "step_started") {
       const s = e as Extract<RunEvent, { type: "step_started" }> & { workerId?: string; label?: string };
       const b: StepBlock = { stepId: s.stepId, attempt: s.attempt, status: "running", items: [] };
+      for (const prev of blocks.values()) if (prev.stepId === s.stepId && prev.attempt < s.attempt) prev.superseded = true;
       blocks.set(`${s.stepId}#${s.attempt}`, b);
       ensure(paneKey(s.stepId, s.workerId, s.label, labels)).steps.push(b);
       continue;

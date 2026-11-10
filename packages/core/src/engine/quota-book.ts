@@ -1,11 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { Overage } from "../schemas/worker-events.js";
 import { readJsonIfExists, writeFileAtomicSync } from "../util/fsx.js";
 
 export interface QuotaBookEntry {
   status: string;
   resetsAt?: number;
   windows: Record<string, { utilization: number; resetsAt?: number }>;
+  overage?: Overage;
   observedAt: number;
 }
 

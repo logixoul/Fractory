@@ -21,30 +21,31 @@ describe("loadConfig", () => {
     expect(warnings).toEqual([]);
     // every LLM call defaults to medium reasoning
     expect(config.workers.opus).toMatchObject({ kind: "claude", model: "opus", effort: "medium", command: "claude" });
-    // Baseten; DeepSeek's "Fast" variant
+    // LithosAI's "Ultra" tier; high, because Lithos runs medium as high
     expect(config.workers.deepseek).toMatchObject({
       kind: "pi",
-      provider: "baseten",
-      model: "deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast",
-      thinking: "medium",
-      passEnv: ["BASETEN_API_KEY"],
+      provider: "lithos",
+      model: "deepseek-ai/DeepSeek-V4.1-Flash-ultra",
+      thinking: "high",
+      passEnv: ["LITHOS_API_KEY"],
     });
+    expect(config.prices["lithos/deepseek-ai/DeepSeek-V4.1-Flash-ultra"]).toMatchObject({ input: 0.35, output: 1.4, cacheRead: 0.007 });
     // default judge: a third model family, not a contestant; GLM-5.3 Flash for cost
     expect(config.roles).toEqual({ contestants: ["opus", "deepseek"], judge: "glm", implementer: "opus", reviewer: "gpt" });
     // review workflow: the reviewer is OpenAI's gpt-6.1-sol via Pi (a different family than opus)
     expect(config.workers.gpt).toMatchObject({ kind: "pi", provider: "openai", model: "gpt-6.1-sol", thinking: "medium", passEnv: ["OPENAI_API_KEY"] });
     expect(config.prices["openai/gpt-6.1-sol"]).toMatchObject({ input: 2, output: 10, cacheRead: 0.1 });
     expect(config.review).toEqual({ maxRounds: 1, maxFixIterations: 2, maxFindings: 30 });
-    expect(config.workers.glm).toMatchObject({ kind: "pi", provider: "baseten", model: "zai-org/GLM-5.3-Flash", thinking: "high" });
+    expect(config.workers.glm).toMatchObject({ kind: "pi", provider: "baseten", model: "zai-org/GLM-5.3-Flash", thinking: "high", passEnv: ["BASETEN_API_KEY"] });
     expect(config.prices["baseten/zai-org/GLM-5.3-Flash"]).toMatchObject({ input: 0.15, output: 0.5, cacheRead: 0.03 });
     expect(config.prices["baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast"]).toMatchObject({ input: 0.6, output: 2.4, cacheRead: 0.014 });
     expect(Object.keys(config.prices).some((k) => k.startsWith("together/"))).toBe(false);
     expect(config.judge.swapOrderPass).toBe(true);
     expect(config.retry).toEqual({ transientMaxRetries: 2, backoffMs: [5000, 30000], rateLimitBackoffMs: [60000, 120000] });
     expect(config.quota.warnUtilization).toBe(0.8);
-    // consensus has its own lineup: GPT-6.1 Sol and the standard DeepSeek 1017 build, judged by Opus
+    // consensus has its own lineup: GPT-6.1 Sol and DeepSeek (same Lithos model as the duel's), judged by Opus
     expect(config.consensus).toMatchObject({ maxRounds: 1, minRefs: 3, contestants: ["gpt", "deepseek-std"], judge: "opus" });
-    expect(config.workers["deepseek-std"]).toMatchObject({ kind: "pi", provider: "baseten", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017", thinking: "medium" });
+    expect(config.workers["deepseek-std"]).toMatchObject({ kind: "pi", provider: "lithos", model: "deepseek-ai/DeepSeek-V4.1-Flash-ultra", thinking: "high", passEnv: ["LITHOS_API_KEY"] });
     expect(config.prices["baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017"]).toMatchObject({ input: 0.3, output: 1.2, cacheRead: 0.007 });
     expect(config.workers.opus).toMatchObject({ kind: "claude", model: "opus", effort: "medium" });
     expect(config.anonymize.patterns).toEqual(expect.arrayContaining(["\\bGPT\\b", "\\bOpenAI\\b", "\\bChatGPT\\b", "\\bCodex\\b"]));
@@ -59,7 +60,7 @@ describe("loadConfig", () => {
     const { config, sources } = loadConfig({ configDir, repo });
     expect(sources).toEqual([path.join(configDir, CONFIG_FILENAME), path.join(repo, CONFIG_FILENAME)]);
     expect(config.quota.warnUtilization).toBe(0.5);
-    expect(config.workers.deepseek).toMatchObject({ kind: "pi", thinking: "off", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast" });
+    expect(config.workers.deepseek).toMatchObject({ kind: "pi", thinking: "off", model: "deepseek-ai/DeepSeek-V4.1-Flash-ultra" });
     expect(config.workers.opus).toMatchObject({ kind: "claude" });
     expect(config.consensus).toMatchObject({ maxRounds: 2, minRefs: 3 });
     expect(config.checks).toEqual([{ name: "test", argv: ["npm", "test"], timeoutMs: 600_000, artifacts: [] }]);
@@ -106,6 +107,7 @@ describe("loadConfig", () => {
     const pi = (provider: string, model: string) => familyOf("x", { kind: "pi", command: "pi", provider, model, thinking: "medium", passEnv: [] });
     expect(pi("openai", "gpt-6.1-sol")).toBe("openai");
     expect(pi("baseten", "deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast")).toBe("deepseek");
+    expect(pi("lithos", "deepseek-ai/DeepSeek-V4.1-Flash-ultra")).toBe("deepseek");
     expect(pi("baseten", "zai-org/GLM-5.3-Flash")).toBe("zhipu");
     expect(pi("openrouter", "openai/gpt-6.1-sol")).toBe("openai");
     expect(pi("together", "Qwen/Qwen3-Coder")).toBe("alibaba");
@@ -121,11 +123,14 @@ describe("loadConfig", () => {
   it("warns when a requested thinking level is not one the model supports on that provider", () => {
     const together = setup(undefined, { workers: { deepseek: { provider: "together", model: "deepseek-ai/DeepSeek-V4.1-Flash-1017", thinking: "low" } } });
     expect(loadConfig(together).warnings.join("\n")).toMatch(/thinking='low' is not supported .* on together \(off\/high\); Pi uses high/);
-    // the defaults (DeepSeek medium, GLM high) are supported: no warning
+    // the defaults (DeepSeek high, GLM high) are supported: no warning
     expect(loadConfig(setup()).warnings.filter((w) => /thinking=/.test(w))).toEqual([]);
     // GLM-5.3 Flash on Baseten has no medium
     const glm = setup(undefined, { workers: { glm: { thinking: "medium" } } });
     expect(loadConfig(glm).warnings.join("\n")).toMatch(/workers\.glm\.thinking='medium' is not supported .* \(low\/high\/max\); Pi uses .*medium → high/);
+    // DeepSeek on Lithos runs medium as high
+    const lithos = setup(undefined, { workers: { deepseek: { thinking: "medium" } } });
+    expect(loadConfig(lithos).warnings.join("\n")).toMatch(/workers\.deepseek\.thinking='medium' is not supported .* on lithos \(off\/low\/high\/max\); Pi uses .*medium → high/);
   });
 
   it("default anonymization patterns are unambiguous (no bare Pi/Together)", () => {

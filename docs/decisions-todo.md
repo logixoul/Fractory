@@ -369,3 +369,23 @@ Requested: GPT-6.1 Sol + standard DeepSeek (1017) as consensus contestants with 
 - **Runs with zero surviving decisions still run the writeup** (open questions only; check 1 is trivially satisfied).
 - **Sections** in the GUI are split at markdown headings; a marker belongs to the heading section containing it. Runs completed before this change have no `planMd` and keep showing decision.md only.
 - **`fractory export <run> --plan --out <path>`** copies plan.md, creating parent directories and overwriting an existing file.
+
+## DeepSeek on LithosAI (2026-11-10)
+Requested: move DeepSeek from Baseten to LithosAI's `deepseek-ai/DeepSeek-V4.1-Flash-ultra` (Baseten 429s); `LITHOS_API_KEY` in the envFile. Details: `docs/interfaces.md` §2 "Provider switch to LithosAI".
+- [ ] **Both DeepSeek workers moved.** `deepseek` (duel) and `deepseek-std` (consensus) are now the same Ultra model. `deepseek-std` is kept as an id so configs that name it still load. *Option:* point `deepseek-std` at Lithos's cheaper base tier `deepseek-ai/DeepSeek-V4.1-Flash` ($0.15 in / $0.60 out per 1M), which needs a second `models.json` entry. Or drop it and make `consensus.contestants` `["gpt", "deepseek"]`.
+- [ ] **GLM judge stays on Baseten.** Only DeepSeek was named. Baseten 429s can still hit duel judging.
+- [ ] **Lithos is a fractory-defined Pi provider.** Pi has no built-in one, so fractory writes `<dataDir>/pi-agent/models.json` (`PI_MODELS`), the way it already writes `settings.json`. That dir is fractory-owned, so hand edits to it are overwritten. Changing the model id or adding a Lithos model means editing `PI_MODELS`, not just the config.
+- [ ] **Default thinking is `high`, explicit**, because Lithos runs `medium` as `high` (same reasoning as the GLM judge). This breaks the "medium everywhere" default for DeepSeek, in name only.
+- [ ] **Price is Lithos's early-access discount** ($0.35 / $1.40 / $0.007 cached). The pricing page also shows $2.80 output, likely the undiscounted price. It wasn't checked in the console. Update `prices` when the discount ends.
+- [ ] **`maxTokens` 262,144** (Lithos allows 393,216) leaves room in the 1M context for input, as with the Baseten builds.
+- [ ] **Smoke script `--pi` runs only `deepseek`**, since `deepseek-std` is now identical. Ran once 2026-11-10: SMOKE OK.
+- [ ] **Baseten DeepSeek prices are kept** in the defaults, for configs that pin the old Baseten workers.
+
+## Claude extra usage, superseded attempts in the live view (2026-11-10)
+Requested: a judge step on Opus hit the 5-hour window (`rejected`) and kept working once the monthly extra-usage cap was raised. Make fractory understand extra usage. Details: `docs/interfaces.md` §1 "Quota / rate-limit signal".
+- [ ] **`rejected` + overage `allowed` is not exhaustion.** The step runs on, no quota pause. Each `rate_limit` event replaces the previous state, so extra usage being allowed again clears an earlier rejection within the same invocation.
+- [ ] **Extra usage is billed as `billing:"overage"`, at API rates from the price table** (vendor `total_cost_usd` stays informational). Claude Code reports usage once per invocation, so an invocation that saw extra usage at any point is billed entirely as overage: an upper bound when the window ran out mid-step.
+- [ ] **Anthropic prices added to the defaults** (`claude-opus-5` $5 / $25 / $0.50 cached / $10 cache write; `claude-haiku-4-5-20251001` $1 / $5 / $0.10 / $2). Derived from Claude Code's own cost figures, which they reproduce to the cent; not checked on anthropic.com. **Cache writes use the 1-hour rate** (2× input) because usage doesn't split 1-hour from 5-minute writes (1.25×). This overstates 5-minute-heavy steps; for attempt 2 of the triggering run, by about $0.24 on $1.44.
+- [ ] **`quota.abortUtilization` still applies on extra usage.** The subscription windows read 100% while on extra usage, so a configured abort threshold stops the run instead of letting it spend extra usage. *Option:* skip the abort while extra usage is allowed. It isn't set by default.
+- [ ] **Header:** an "extra usage" badge (amber) replaces the red `rejected` while extra usage is allowed, and Claude totals add "· extra usage $X". The run's worker billing stays `overage` once any record is.
+- [ ] **Live view: earlier attempts of a retried step collapse** into one "attempt N (superseded)" line (expandable), so the running attempt is the one in view. The failure detail moved under the step header instead of being truncated inside it.

@@ -18,6 +18,21 @@ export const QuotaWindow = z.object({
 });
 
 /**
+ * Claude extra usage ("overage"): pay-as-you-go beyond the subscription windows. While it is
+ * allowed, a `rejected` subscription status does not stop work.
+ */
+export const Overage = z.object({
+  /** "allowed" | "allowed_warning" | "rejected" | … (Claude Code's `overageStatus`) */
+  status: z.string(),
+  /** Claude Code's `isUsingOverage`: this call is billed as extra usage. */
+  inUse: z.boolean(),
+  /** epoch ms */
+  resetsAt: z.number().optional(),
+  disabledReason: z.string().optional(),
+});
+export type Overage = z.infer<typeof Overage>;
+
+/**
  * Normalized worker stream. Adapters translate vendor events into these; the raw
  * vendor stream is kept separately per step for debugging. All times are epoch ms.
  */
@@ -43,10 +58,11 @@ export const WorkerEvent = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("rate_limit"),
-    /** "allowed" | "allowed_warning" | anything else = exhausted */
+    /** "allowed" | "allowed_warning" | anything else = subscription windows exhausted */
     status: z.string(),
     resetsAt: z.number().optional(),
     windows: z.record(z.string(), QuotaWindow).default({}),
+    overage: Overage.optional(),
   }),
   /**
    * A retry inside the worker CLI (Pi's auto_retry_start/end): "scheduled" before the backoff
@@ -83,6 +99,14 @@ export type WorkerEvent = z.infer<typeof WorkerEvent>;
 export type WorkerEventInput = z.input<typeof WorkerEvent>;
 export type DoneEvent = Extract<WorkerEvent, { type: "done" }>;
 
-export function isQuotaExhaustedStatus(status: string): boolean {
-  return status !== "allowed" && status !== "allowed_warning";
+const isAllowed = (status: string) => status === "allowed" || status === "allowed_warning";
+
+/** Work cannot continue: the subscription windows are exhausted and extra usage is not allowed. */
+export function isQuotaExhaustedStatus(status: string, overage?: Overage): boolean {
+  return !isAllowed(status) && !(overage && isAllowed(overage.status));
+}
+
+/** Subscription windows exhausted, but extra usage is allowed: work continues, billed. */
+export function isOnExtraUsage(status: string, overage?: Overage): boolean {
+  return !isAllowed(status) && !!overage && isAllowed(overage.status);
 }

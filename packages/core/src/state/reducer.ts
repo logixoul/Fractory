@@ -130,7 +130,8 @@ export function reduceInto(state: RunState | null, ev: RunEvent): RunState {
       if (ev.costUsd === null) t.costUnknown = true;
       else t.costUsd += ev.costUsd;
       if (ev.vendorCostUsd !== undefined) t.vendorCostUsd += ev.vendorCostUsd;
-      if (ev.billing !== undefined) t.billing = ev.billing;
+      // A Claude worker that ran on extra usage at any point stays "overage" for the run.
+      if (ev.billing !== undefined && t.billing !== "overage") t.billing = ev.billing;
       break;
     }
     case "step_retrying":
@@ -151,6 +152,7 @@ export function reduceInto(state: RunState | null, ev: RunEvent): RunState {
     case "quota_observed": {
       const q: QuotaState = { status: ev.status, windows: structuredClone(ev.windows), observedAt: ev.ts };
       if (ev.resetsAt !== undefined) q.resetsAt = ev.resetsAt;
+      if (ev.overage !== undefined) q.overage = structuredClone(ev.overage);
       s.quota[ev.workerId] = q;
       break;
     }

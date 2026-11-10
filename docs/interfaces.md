@@ -68,7 +68,8 @@ claude -p --output-format stream-json --verbose
 - Every call emits `rate_limit_event` early (before the first assistant message). It gives `status`, `resetsAt` (**epoch seconds**), `rateLimitType`, and `unifiedWindows.{five_hour,seven_day}.utilization` (0–1).
 - `status: "allowed"` was observed. Handling:
   - `allowed` / `allowed_warning` → `rate_limit` WorkerEvent with utilization (GUI header, pre-flight warning §8.11).
-  - anything else → **quota exhausted**: `paused_quota` with `resetsAt`.
+  - anything else (observed: `rejected`) → subscription windows exhausted. This is **quota exhausted** (`paused_quota` with `resetsAt`) **unless extra usage is allowed**.
+- **Extra usage (overage), observed 2026-11-10:** once relevant, `rate_limit_info` also carries `overageStatus`, `isUsingOverage`, `overageResetsAt` (epoch seconds) and `overageDisabledReason`. With `status:"rejected", overageStatus:"allowed", isUsingOverage:true`, Claude keeps working on extra usage, billed at API rates. With `overageStatus:"rejected"` (e.g. `overageDisabledReason:"org_level_disabled_until"`, the monthly cap), the call ends in an `is_error` result ("You've hit your monthly spend limit …"). Adapter: `rate_limit.overage = {status, inUse, resetsAt?, disabledReason?}`. Usage from an invocation that saw extra usage is recorded `billing:"overage"`, with cost computed from `prices` (`anthropic/<model>`).
 - Also a quota signal: `result.is_error === true` with `api_error_status` 429, or result text matching `/usage limit|rate limit|limit reached/i`. Use the last seen `resetsAt`.
 - *Inferred:* the rejected-status shape wasn't observed (we didn't exhaust quota). The adapter is lenient by design. No retry, ever.
 
@@ -239,6 +240,21 @@ Findings:
 - **DeepSeek `medium` vs `none`/`high`:** no measurable difference on this prompt (0 reasoning tokens and the same 187–188 completion tokens at every level). The prompt is trivial, so the model may simply not think on it. A harder prompt is needed to see whether the level matters.
 - **GLM `high` vs `low`:** no difference on this prompt either. Only `max` produced visible reasoning here.
 
+### Provider switch to LithosAI for DeepSeek (2026-11-10, by user request: 429s on Baseten)
+Both DeepSeek workers (`deepseek` for the duel, `deepseek-std` for consensus) now run `deepseek-ai/DeepSeek-V4.1-Flash-ultra` on **LithosAI**. The GLM-5.3 Flash judge stays on Baseten. Invocation, guard, stream parsing and gates are unchanged.
+
+| | Status |
+|---|---|
+| Pi provider | **Not built into Pi 1.5.0.** fractory writes a custom provider `lithos` (`PI_MODELS` in `workers/pi.ts`) to `<dataDir>/pi-agent/models.json`, next to `settings.json`, before every Pi call. It uses `api: "openai-completions"`, `baseUrl: https://api.lithosai.cloud/v1` and `apiKey: "$LITHOS_API_KEY"` (Pi's env interpolation, so the file holds no secret). |
+| Key env `LITHOS_API_KEY` | `Authorization: Bearer` (docs.lithosai.com/authentication). Workers' `passEnv` is `["LITHOS_API_KEY"]`. |
+| Model id | `deepseek-ai/DeepSeek-V4.1-Flash-ultra`, one of three ids (`…-Flash`, `…-fast`, `…-ultra`) that serve the same weights with their own rates and rate limits (docs.lithosai.com/models/deepseek-v4-1-flash). |
+| Limits | Context 1,048,576. Max output 393,216, but input + `max_tokens` must fit the context (else 400), so the catalog entry uses `maxTokens` 262,144, as for the Baseten builds. |
+| Prices, USD per 1M (lithosai.com/pricing, "Ultra" tier, **early-access discount**) | input 0.35, output 1.40, cached input 0.007. No cache-write rate exists (billing: "input, cached input and output"). The page also shows $2.80 next to the output price, probably the undiscounted price. Not checked in the console. |
+| Compat | Lithos returns 400 for undeclared request fields, so `store`, the developer role, session-affinity headers and long cache retention are off. `max_tokens` (not `max_completion_tokens`). Reasoning goes as `reasoning_effort` (`thinkingFormat: "openai"`). |
+| Reasoning levels | Lithos accepts none/minimal/low/medium/high/xhigh/max/ultra but runs only **off/low/high/max** (minimal → low; medium, xhigh → high; ultra → max). The catalog maps off→`none` and nulls the rest, so Pi clamps and reports the effective level. Default `high`, explicit. |
+| Stream, tools, usage, caching | verified (probe + `smoke-real.mjs --pi`, 2026-11-10): tool round trip, `message_end.provider` = `lithos`, `thinkingLevel` = `high` for a `medium` request, `usage.reasoning` reported, `cacheRead` on the second turn (1280 of 1737 input tokens), guard block and gates OK. Replaying assistant turns without `reasoning_content` worked. |
+| Rate limits | Per model and organization: requests, input tokens and output tokens per minute (numbers on the console Limits page, not read). 429 bodies carry `rate_limit_exceeded` or `provider_overloaded`. Headers include `retry-after` / `retry-after-ms`, which Pi's provider-level retry honours (see "Retries"). 402 `insufficient_quota` = prepaid balance empty. |
+
 ## 2a. OpenAI through Pi (review workflow reviewer, 2026-11-09)
 
 The review workflow's default reviewer is `gpt-6.1-sol` via Pi's built-in `openai` provider: same adapter, same path guard, same gates. **Not yet verified with a real call.** Everything below comes from Pi 1.5.0's bundled sources; run `npm run smoke -- --gpt` to verify.
@@ -276,7 +292,7 @@ The worker's `passEnv` is `["OPENAI_API_KEY"]`. That filter applies to the **she
 | Requested | `--model opus` | `--provider together --model <id>` |
 | Resolved id | `system/init.model` (`claude-opus-5`) + `result.modelUsage` keys (includes background Haiku) | `message_end.message.{provider,model}` (echo of request; no `responseModel` from Together) |
 | Reasoning flag | `--effort low\|medium\|high\|xhigh\|max` | `--thinking off\|minimal\|low\|medium\|high\|xhigh\|max` |
-| Effective level reported? | **No.** `init` has no effort field. We log the requested value. | **Yes**, `message_end.message.thinkingLevel`. On Together, for DeepSeek-V4.1-Flash only **`off`** and **`high`** are effective; `minimal/low/medium/max` all clamp to `high`. For the Baseten models, see §2 "Provider switch to Baseten". |
+| Effective level reported? | **No.** `init` has no effort field. We log the requested value. | **Yes**, `message_end.message.thinkingLevel`. On Together, for DeepSeek-V4.1-Flash only **`off`** and **`high`** are effective; `minimal/low/medium/max` all clamp to `high`. For the Baseten models, see §2 "Provider switch to Baseten"; for DeepSeek on LithosAI, §2 "Provider switch to LithosAI". |
 
 Every step logs `{requestedModel, resolvedModels[], requestedReasoning, effectiveReasoning|null}`.
 

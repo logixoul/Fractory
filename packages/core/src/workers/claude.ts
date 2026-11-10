@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { z } from "zod";
 import type { ClaudeWorkerConfig } from "../schemas/config.js";
-import type { WorkerEventInput } from "../schemas/worker-events.js";
+import type { Overage, WorkerEventInput } from "../schemas/worker-events.js";
 import { CLAUDE_SCRUBBED_ENV, withoutEnv } from "../util/env.js";
 import type { ProcEnd } from "../util/proc.js";
 import type { Redactor } from "../util/redact.js";
@@ -130,7 +130,26 @@ export class ClaudeStreamParser implements StreamParser {
         }
         const resetsAt = sToMs(info.resetsAt);
         if (resetsAt !== undefined) this.#lastResetsAt = resetsAt;
-        return [{ type: "rate_limit", status: String(info.status ?? "unknown"), windows, ...(resetsAt !== undefined ? { resetsAt } : {}) }];
+        // Extra usage: only reported once relevant (observed with `overageStatus` set).
+        let overage: Overage | undefined;
+        if (typeof info.overageStatus === "string") {
+          const r = sToMs(info.overageResetsAt);
+          overage = {
+            status: info.overageStatus,
+            inUse: info.isUsingOverage === true,
+            ...(r !== undefined ? { resetsAt: r } : {}),
+            ...(typeof info.overageDisabledReason === "string" ? { disabledReason: info.overageDisabledReason } : {}),
+          };
+        }
+        return [
+          {
+            type: "rate_limit",
+            status: String(info.status ?? "unknown"),
+            windows,
+            ...(resetsAt !== undefined ? { resetsAt } : {}),
+            ...(overage ? { overage } : {}),
+          },
+        ];
       }
       case "assistant": {
         const out: WorkerEventInput[] = [];

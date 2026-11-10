@@ -3,9 +3,9 @@
 A local orchestrator that runs two coding agents from different model families on your repository, under a deterministic control plane:
 
 - **Opus** through Claude Code, on your Claude Pro subscription (no Anthropic API key).
-- **DeepSeek V4.1 Flash** (Baseten's "Fast" variant) through the Pi coding agent, on Baseten.
+- **DeepSeek V4.1 Flash** (LithosAI's "Ultra" tier) through the Pi coding agent, on LithosAI.
 
-The duel's default judge is **GLM-5.3 Flash** (Baseten, via Pi), a third model family. The review workflow's default reviewer is **GPT-6.1 Sol** (OpenAI API, via Pi). **Consensus has its own lineup:** GPT-6.1 Sol and DeepSeek V4.1 Flash 1017 (the standard, non-Fast build on Baseten) write the proposals, and Opus judges (effort medium). Opus, DeepSeek and GPT use medium reasoning by default; the GLM judge uses high, because GLM-5.3 Flash has no medium level.
+The duel's default judge is **GLM-5.3 Flash** (Baseten, via Pi), a third model family. The review workflow's default reviewer is **GPT-6.1 Sol** (OpenAI API, via Pi). **Consensus has its own lineup:** GPT-6.1 Sol and DeepSeek V4.1 Flash Ultra (the same LithosAI model as the duel's, worker `deepseek-std`) write the proposals, and Opus judges (effort medium). Opus and GPT use medium reasoning by default. DeepSeek and the GLM judge use high: LithosAI runs medium as high, and GLM-5.3 Flash has no medium level.
 
 It has three workflows:
 
@@ -22,7 +22,7 @@ the Linux and macOS CI jobs have not yet been verified.
 
 - **Node.js 22.19 or newer** and **git**.
 - **Claude Code** (`claude`), logged in with your Pro subscription. fractory never uses `--bare` or an API key. It removes `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` from Claude's environment, and refuses to run unless Claude reports the subscription login.
-- **Pi** (`npm install -g @earendil-works/pi-coding-agent`) and a **Baseten API key** (`BASETEN_API_KEY`). Baseten is one of Pi's built-in providers.
+- **Pi** (`npm install -g @earendil-works/pi-coding-agent`), a **LithosAI API key** (`LITHOS_API_KEY`, for DeepSeek) and a **Baseten API key** (`BASETEN_API_KEY`, for the GLM judge). Baseten is one of Pi's built-in providers. LithosAI isn't: fractory defines it in the `models.json` of its own Pi agent dir (`<data dir>/pi-agent`), which it keeps in sync before every Pi call.
 - For the review workflow's default reviewer: an **OpenAI API key** (`OPENAI_API_KEY`), also used through Pi.
 - For the GUI: any current browser.
 
@@ -53,7 +53,7 @@ fractory merges, in increasing order of precedence: built-in defaults, the **glo
 Override them with `FRACTORY_CONFIG_DIR` / `FRACTORY_DATA_DIR`, or `--config-dir` / `--data-dir`.
 On Linux, `XDG_CONFIG_HOME` and `XDG_DATA_HOME` replace the respective default parent directories.
 
-The Baseten and OpenAI keys come either from your shell environment (`BASETEN_API_KEY`, `OPENAI_API_KEY`) or from a dotenv file named by `envFile`. A relative `envFile` path is resolved against the config file that declares it. Each Pi worker gets only the keys in its `passEnv`; it never reaches Claude, your checks, or any log.
+The LithosAI, Baseten and OpenAI keys come either from your shell environment (`LITHOS_API_KEY`, `BASETEN_API_KEY`, `OPENAI_API_KEY`) or from a dotenv file named by `envFile`. A relative `envFile` path is resolved against the config file that declares it. Each Pi worker gets only the keys in its `passEnv`; it never reaches Claude, your checks, or any log.
 
 A typical global config:
 
@@ -83,10 +83,10 @@ Other options you may want:
 | Key | Default | Meaning |
 |---|---|---|
 | `workers.opus` | `{ "kind": "claude", "model": "opus", "effort": "medium" }` | Claude worker |
-| `workers.deepseek` | `{ "kind": "pi", "provider": "baseten", "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017-Fast", "thinking": "medium" }` | Pi worker |
+| `workers.deepseek` | `{ "kind": "pi", "provider": "lithos", "model": "deepseek-ai/DeepSeek-V4.1-Flash-ultra", "thinking": "high", "passEnv": ["LITHOS_API_KEY"] }` | Pi worker (effective levels on LithosAI: off/low/high/max) |
 | `workers.glm` | `{ "kind": "pi", "provider": "baseten", "model": "zai-org/GLM-5.3-Flash", "thinking": "high" }` | Pi worker used as judge (levels: low/high/max) |
 | `workers.gpt` | `{ "kind": "pi", "provider": "openai", "model": "gpt-6.1-sol", "thinking": "medium", "passEnv": ["OPENAI_API_KEY"] }` | Pi worker: review reviewer, consensus contestant |
-| `workers.deepseek-std` | `{ "kind": "pi", "provider": "baseten", "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "thinking": "medium" }` | Pi worker: consensus contestant (standard build, half the Fast price) |
+| `workers.deepseek-std` | same as `workers.deepseek` | Pi worker: consensus contestant |
 | `workers.<id>.family` | inferred | model family (`anthropic`, `openai`, `deepseek`, ...); set it when it can't be inferred from the provider or model id |
 | `roles` | `{ "contestants": ["opus", "deepseek"], "judge": "glm", "implementer": "opus", "reviewer": "gpt" }` | duel: who competes and judges; review: who implements and reviews (reviewer and implementer must be different families) |
 | `review` | `{ "maxRounds": 1, "maxFixIterations": 2, "maxFindings": 30 }` | rebuttal rounds; fix rounds after each edit; findings cap |
@@ -97,7 +97,7 @@ Other options you may want:
 | `retry` | `{ "transientMaxRetries": 2, "backoffMs": [5000, 30000], "rateLimitBackoffMs": [60000, 120000] }` | step retries after 5xx / network / provider 429 errors, once Pi's own retries are used up; a Retry-After in the error is honoured |
 | `quota` | `{ "warnUtilization": 0.8 }` | warn when the last known Claude 5-hour or 7-day usage is above this |
 | `timeouts` | `{ "workerMs": 1800000, "judgeMs": 1200000 }` | per worker call |
-| `prices` | Baseten prices for DeepSeek Fast and GLM-5.3 Flash; OpenAI for GPT-6.1 Sol | USD per 1M tokens, keyed `provider/model`; cost is computed by fractory |
+| `prices` | LithosAI for DeepSeek Ultra; Baseten for GLM-5.3 Flash (and the Baseten DeepSeek builds); OpenAI for GPT-6.1 Sol | USD per 1M tokens, keyed `provider/model`; cost is computed by fractory |
 | `contextFiles` | `["AGENTS.md", "CLAUDE.md"]` | repo files injected into both agents' prompts, identically |
 
 Commands in `setup` and `checks` are argument arrays, never shell strings. They get no secret-looking environment variables; pass what they need in their `env`.
